@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from linkedin_bot.domain.models import (
+    ActionResult,
     ActionSnapshot,
     Artifact,
     CandidateFact,
@@ -340,6 +341,207 @@ class Database:
             ).rowcount
             if updated != 1:
                 raise RevisionConflict("stale_action")
+
+        await self.call(write)
+
+    async def save_policy(self, policy: Policy, expected_revision: int) -> None:
+        if policy.paused or policy.restore_audit_required:
+            raise BoundaryError("runtime_flags_are_not_policy")
+
+        def write(connection: sqlite3.Connection) -> None:
+            with transaction(connection):
+                latest = connection.execute("SELECT MAX(revision) FROM policies").fetchone()[0]
+                if latest != expected_revision or policy.revision != latest + 1:
+                    raise RevisionConflict("policy_revision_conflict")
+                connection.execute(
+                    "INSERT INTO policies VALUES (?,?)", (policy.revision, policy.model_dump_json())
+                )
+                connection.execute(
+                    "UPDATE actions SET state='blocked',reason_code='stale_policy' "
+                    "WHERE state IN ('proposed','ready','awaiting_approval')"
+                )
+                connection.execute("UPDATE approvals SET invalidated=1 WHERE consumed_at IS NULL")
+
+        await self.call(write)
+
+    async def used_today(self, local_date: str) -> dict[str, int]:
+        """Dispatched and unresolved effects; released reservations do not count."""
+
+        def read(connection: sqlite3.Connection) -> dict[str, int]:
+            counts = {"application": 0, "communication": 0}
+            for name, count in connection.execute(
+                "SELECT category,count(*) FROM reservations WHERE local_date=? AND released=0 "
+                "GROUP BY category",
+                (local_date,),
+            ):
+                counts[name] = count
+            return counts
+
+        return await self.call(read)
+
+    async def action(self, action_id: str) -> tuple[ActionSnapshot, str]:
+        def read(connection: sqlite3.Connection) -> tuple[ActionSnapshot, str]:
+            row = connection.execute(
+                "SELECT r.snapshot,a.state FROM actions a JOIN action_revisions r "
+                "ON r.action_id=a.id AND r.revision=a.revision WHERE a.id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                raise RevisionConflict("unknown_action")
+            return ActionSnapshot.model_validate_json(row[0]), row[1]
+
+        return await self.call(read)
+
+    async def actions_in_state(self, state: str) -> tuple[ActionSnapshot, ...]:
+        def read(connection: sqlite3.Connection) -> tuple[ActionSnapshot, ...]:
+            rows = connection.execute(
+                "SELECT r.snapshot FROM actions a JOIN action_revisions r "
+                "ON r.action_id=a.id AND r.revision=a.revision WHERE a.state=? ORDER BY a.rowid",
+                (state,),
+            )
+            return tuple(ActionSnapshot.model_validate_json(row[0]) for row in rows)
+
+        return await self.call(read)
+
+    async def await_approval(self, action: ActionSnapshot, expires_at: datetime) -> str:
+        def write(connection: sqlite3.Connection) -> str:
+            with transaction(connection):
+                updated = connection.execute(
+                    "UPDATE actions SET state='awaiting_approval',reason_code=NULL "
+                    "WHERE id=? AND revision=? AND digest=? AND state='proposed'",
+                    (action.id, action.revision, action.content_digest),
+                ).rowcount
+                if updated != 1:
+                    raise RevisionConflict("stale_action")
+                approval_id = identifier()
+                connection.execute(
+                    "INSERT INTO approvals(id,action_id,revision,digest,expires_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        approval_id,
+                        action.id,
+                        action.revision,
+                        action.content_digest,
+                        expires_at.isoformat(),
+                    ),
+                )
+                return approval_id
+
+        return await self.call(write)
+
+    async def approval_for(self, action_id: str) -> str | None:
+        row = await self.call(
+            lambda c: c.execute(
+                "SELECT id FROM approvals WHERE action_id=? AND invalidated=0 "
+                "AND consumed_at IS NULL ORDER BY rowid DESC LIMIT 1",
+                (action_id,),
+            ).fetchone()
+        )
+        return row[0] if row else None
+
+    async def decide_approval(self, approval_id: str, approve: bool, at: datetime) -> str:
+        """Single-use. Anything but a live approval of the current revision is `stale`."""
+
+        def write(connection: sqlite3.Connection) -> str:
+            with transaction(connection):
+                row = connection.execute(
+                    "SELECT p.action_id,p.revision,p.digest,p.expires_at FROM approvals p "
+                    "WHERE p.id=? AND p.invalidated=0 AND p.consumed_at IS NULL",
+                    (approval_id,),
+                ).fetchone()
+                if row is None or at > datetime.fromisoformat(row[3]):
+                    return "stale"
+                state = "ready" if approve else "cancelled"
+                updated = connection.execute(
+                    "UPDATE actions SET state=?,reason_code=NULL WHERE id=? AND revision=? "
+                    "AND digest=? AND state='awaiting_approval'",
+                    (state, row[0], row[1], row[2]),
+                ).rowcount
+                if updated != 1:
+                    return "stale"
+                connection.execute(
+                    "UPDATE approvals SET consumed_at=? WHERE id=?", (at.isoformat(), approval_id)
+                )
+                return "approved" if approve else "rejected"
+
+        return await self.call(write)
+
+    async def block_ready(self, action: ActionSnapshot, reason: str) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            updated = connection.execute(
+                "UPDATE actions SET state='blocked',reason_code=? WHERE id=? AND revision=? "
+                "AND digest=? AND state IN ('ready','awaiting_approval')",
+                (reason, action.id, action.revision, action.content_digest),
+            ).rowcount
+            if updated != 1:
+                raise RevisionConflict("stale_action")
+
+        await self.call(write)
+
+    async def begin_attempt(
+        self, action: ActionSnapshot, local_date: str, category: str, cap: int, at: datetime
+    ) -> str:
+        """Reserve a daily slot and mark the action executing, in one transaction."""
+
+        def write(connection: sqlite3.Connection) -> str:
+            with transaction(connection):
+                ready = connection.execute(
+                    "SELECT count(*) FROM actions a JOIN approvals p ON p.action_id=a.id "
+                    "AND p.revision=a.revision AND p.digest=a.digest WHERE a.id=? AND a.revision=? "
+                    "AND a.digest=? AND a.state='ready' AND p.consumed_at IS NOT NULL "
+                    "AND p.invalidated=0",
+                    (action.id, action.revision, action.content_digest),
+                ).fetchone()[0]
+                if not ready:
+                    raise RevisionConflict("not_ready")
+                used = connection.execute(
+                    "SELECT count(*) FROM reservations WHERE local_date=? AND category=? "
+                    "AND released=0",
+                    (local_date, category),
+                ).fetchone()[0]
+                if used >= cap:
+                    raise BoundaryError("cap_exhausted")
+                attempt_id = identifier()
+                connection.execute(
+                    "INSERT INTO attempts(id,action_id,revision,started_at) VALUES (?,?,?,?)",
+                    (attempt_id, action.id, action.revision, at.isoformat()),
+                )
+                connection.execute(
+                    "INSERT INTO reservations VALUES (?,?,?,0)", (attempt_id, local_date, category)
+                )
+                connection.execute("UPDATE actions SET state='executing' WHERE id=?", (action.id,))
+                return attempt_id
+
+        return await self.call(write)
+
+    async def mark_dispatch(self, attempt_id: str, at: datetime) -> None:
+        """Committed before the effect starts, so a crash afterwards reads as unknown."""
+        await self.call(
+            lambda c: c.execute(
+                "UPDATE attempts SET dispatch_at=? WHERE id=?", (at.isoformat(), attempt_id)
+            )
+        )
+
+    async def finish_attempt(self, attempt_id: str, result: ActionResult) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            with transaction(connection):
+                action_id = connection.execute(
+                    "SELECT action_id FROM attempts WHERE id=? AND outcome IS NULL", (attempt_id,)
+                ).fetchone()
+                if action_id is None:
+                    raise RevisionConflict("attempt_finished")
+                connection.execute(
+                    "UPDATE attempts SET outcome=?,reason_code=?,evidence_reference=? WHERE id=?",
+                    (result.outcome, result.reason_code, result.evidence_reference, attempt_id),
+                )
+                connection.execute(
+                    "UPDATE actions SET state=?,reason_code=? WHERE id=?",
+                    (result.outcome, result.reason_code, action_id[0]),
+                )
+                if result.outcome == "failed":
+                    connection.execute(
+                        "UPDATE reservations SET released=1 WHERE attempt_id=?", (attempt_id,)
+                    )
 
         await self.call(write)
 

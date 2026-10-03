@@ -83,11 +83,17 @@ ActionState = Literal[
 ]
 
 
+MAX_DAILY_APPLICATIONS = 10
+MAX_DAILY_COMMUNICATIONS = 5
+
+
 class Policy(Contract):
+    """Caps start at zero; the ceilings are hard limits no setting can exceed."""
+
     revision: int = Field(default=1, ge=1)
-    mode: Literal["draft_only"] = "draft_only"
-    application_cap: Literal[0] = 0
-    communication_cap: Literal[0] = 0
+    mode: Literal["draft_only", "reviewed"] = "draft_only"
+    application_cap: int = Field(default=0, ge=0, le=MAX_DAILY_APPLICATIONS)
+    communication_cap: int = Field(default=0, ge=0, le=MAX_DAILY_COMMUNICATIONS)
     paused: bool = False
     restore_audit_required: bool = False
 
