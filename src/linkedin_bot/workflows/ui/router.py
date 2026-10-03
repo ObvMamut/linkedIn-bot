@@ -22,7 +22,9 @@ from linkedin_bot.runtime.privacy import BoundaryError
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.workspace import WorkspaceStore
+from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.linkedin_commands import Connector, LinkedInCommands
+from linkedin_bot.workflows.searching import split_job_query
 from linkedin_bot.workflows.ui import screens
 from linkedin_bot.workflows.ui.keyboard import Button, Screen, to_markup
 from linkedin_bot.workflows.ui.screens import LIST_FIELDS, LOADING, pin_key
@@ -52,14 +54,6 @@ class Ctx:
     answered: bool = False
 
 
-def split_job_query(text: str) -> tuple[str, str | None]:
-    """'security intern in Berlin' -> ('security intern', 'Berlin')."""
-    words, separator, place = text.rpartition(" in ")
-    if separator and words.strip() and place.strip():
-        return words.strip(), place.strip()
-    return text.strip(), None
-
-
 def split_items(text: str) -> list[str]:
     parts = [part.strip() for part in text.replace("\n", ",").split(",")]
     return [part for part in parts if 0 < len(part) <= 60][:20]
@@ -73,9 +67,11 @@ class UI:
         linkedin: LinkedInCommands | None,
         board_finder: BoardFinder | None = None,
         llm_enabled: bool = False,
+        digest_service: DigestService | None = None,
     ) -> None:
         self.db, self.api, self.linkedin, self.finder = database, api, linkedin, board_finder
         self.llm_enabled = llm_enabled
+        self.digest_service = digest_service
         self.store = WorkspaceStore(database)
         self.linked = LinkedInStore(database)
         self.tokens = TokenMap()
@@ -614,9 +610,22 @@ class UI:
             hours, minutes = (int(part) for part in current.local_time.split(":"))
             total = (hours * 60 + minutes + (30 if rest.endswith("+") else -30)) % (24 * 60)
             await self.store.update_digest(local_time=f"{total // 60:02d}:{total % 60:02d}")
+        elif rest == "now":
+            await self.digest_now(ctx)
+            return
         else:
             raise ValueError("unknown_digest_action")
         await self.show(ctx, await self.settings_screen("digest"))
+
+    async def digest_now(self, ctx: Ctx) -> None:
+        if self.digest_service is None:
+            await self.show(ctx, screens.error_screen("The digest is not available.", "set:digest"))
+            return
+        await self.loading(ctx, "⏳ Building your digest…")
+        text = await self.digest_service.build()
+        await self.show(
+            ctx, Screen(text[:3900], [[Button("⬅ Digest settings", "set:digest"), screens.HOME]])
+        )
 
     # ---- pending text input -------------------------------------------------------------
     async def consume(self, ctx: Ctx, name: str, text: str) -> None:

@@ -360,6 +360,7 @@ def digest_screen(settings: DigestSettings) -> Screen:
             ],
             [Button(f"Pinned-firm alerts: {mark(settings.alerts_boards)}", "dg:alerts_boards")],
             [Button(f"Message alerts: {mark(settings.alerts_messages)}", "dg:alerts_messages")],
+            [Button("📨 Send digest now", "dg:now")],
             [Button("⬅ Settings", "m:set"), HOME],
         ],
     )

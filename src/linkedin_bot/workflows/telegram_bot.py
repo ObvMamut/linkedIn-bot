@@ -24,6 +24,7 @@ from linkedin_bot.domain.models import (
 )
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
@@ -73,7 +74,14 @@ class Bot:
         self.executor = executor or Executor(database)
         self.linkedin = linkedin
         self.store = TelegramStore(database)
-        self.ui = UI(database, api, linkedin, board_finder, llm_enabled=generator is not None)
+        self.ui = UI(
+            database,
+            api,
+            linkedin,
+            board_finder,
+            llm_enabled=generator is not None,
+            digest_service=DigestService(database, linkedin, generator),
+        )
 
     async def handle(self, update: Update) -> None:
         if update.update_id <= await self.store.last_update_id():

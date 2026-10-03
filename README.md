@@ -52,19 +52,52 @@ Use `run --once` to process at most one due item. Ctrl-C or SIGTERM stops claims
 the bounded current read, closes clients/storage, and releases the kernel-held lock.
 ## Telegram (M2)
 
-Create a bot with BotFather and export `LINKEDIN_AUTOMATION_BOT_TOKEN` in your shell (never in a file
-or chat). Then:
+Create a bot with BotFather and keep its token in `LINKEDIN_AUTOMATION_BOT_TOKEN` (an environment
+variable, or a private file your shell sources; never in the repo). Then:
 
 ```sh
 uv run linkedin-bot pair        # prints a one-use code, valid ten minutes
 # send "/start <code>" to the bot from a private chat
 uv run linkedin-bot telegram    # foreground long polling; --once handles one batch
+uv run linkedin-bot serve       # the same, plus board collection and the opt-in digest and alerts
 ```
+
+Send `/menu` for the button interface: Messages, Search (people, firms, jobs), Pinned, Jobs,
+Saved, Settings and Status. Results are cards with Prev/Next, Pin, Open and Save search; one
+message edits itself in place. Typed commands below still work.
 
 Commands: `/opportunities` (ranked matches with reasons), `/prepare <id>` (cover-letter draft for
 review; needs `inference.model` and a running local Ollama), `/pending`, `/approve <id>`,
 `/reject <id>`, `/policy` (mode and daily caps, changes need `confirm`, hard ceilings 10
 applications and 5 messages per day), `/resolve <action> success|none <note>`, `/pause`, `/resume`.
+
+## Settings, pins, saved searches, digest
+
+All of this is plain rules, no AI, and is edited from the buttons:
+
+- **Settings**: locations and remote, internship preference, role keywords (must-have and
+  excluded words are hard filters; nice-to-have only ranks), blocked firms and preferred
+  industries, languages, maximum posting age, and the **priority order** of the ranking criteria
+  (role, location, firm, freshness, language). Free-text **interests** are stored for the later
+  AI check, which stays off until a local model is installed.
+- **Pinned** firms and people with notes and tags. For a firm, "Find job board" probes Greenhouse,
+  Lever and Ashby (public requests only) and schedules collection; pinned firms get the biggest
+  ranking boost.
+- **Saved searches** (people, firms, jobs): rerun with one tap to see only what is new.
+- **Daily digest and alerts** (all off until you switch them on, and only while `serve` runs):
+  digest at a chosen time, alerts for new openings at pinned firms, optional alerts for unread
+  LinkedIn messages (never quoting message text), with quiet hours. A digest uses at most 5
+  LinkedIn page loads inside the hourly and daily limits.
+
+## Speed
+
+A warm headless browser stays open between commands and closes after 10 idle minutes
+(`linkedin.idle_close_seconds`). Burst pacing applies only to back-to-back
+loads, images/fonts/ads are not loaded (`linkedin.block_resources`), each read waits for the one
+element it needs, and repeat reads are cached in memory (messages 60 s, searches 5 min, profiles
+10 min; Refresh bypasses the cache). `linkedin-bot linkedin timing` prints per-step times (never
+content). Measured warm: status ~3 s, inbox ~4 s, searches and profile ~2 s, cached 0 s. Send
+`/li_release` before `linkedin login` so the warm browser lets go of the profile.
 
 ## LinkedIn (read-only)
 

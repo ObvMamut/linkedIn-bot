@@ -40,6 +40,7 @@ from linkedin_bot.workflows.boards import find_board, public_probe
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.monitor import run_one
+from linkedin_bot.workflows.serve import Scheduler, monitor_loop, run_scheduler
 from linkedin_bot.workflows.telegram_bot import Bot, poll_once
 
 
@@ -72,6 +73,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("pair", help="Print a one-use Telegram pairing code (valid ten minutes)")
     telegram = commands.add_parser("telegram", help="Poll Telegram in the foreground")
     telegram.add_argument("--once", action="store_true", help="Handle one polling batch")
+    commands.add_parser(
+        "serve",
+        help="Foreground process: Telegram, board collection, and the opt-in digest and alerts",
+    )
     linkedin = commands.add_parser("linkedin", help="Read-only LinkedIn session tools")
     linkedin.add_argument("action", choices=("login", "status", "timing"))
     probe = commands.add_parser("probe", help="Explicit bounded feasibility checks")
@@ -236,6 +241,9 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                         "instruction": "Send /start <code> to your bot from a private chat",
                     }
                 )
+            elif args.command == "serve":
+                await telegram_foreground(database, config, once=False, background=True)
+                emit({"stopped": True})
             elif args.command == "telegram":
                 await telegram_foreground(database, config, once=args.once)
                 emit({"stopped": True})
@@ -288,7 +296,9 @@ async def foreground(database: Database, *, once: bool) -> None:
             loop.remove_signal_handler(signum)
 
 
-async def telegram_foreground(database: Database, config: Config, *, once: bool) -> None:
+async def telegram_foreground(
+    database: Database, config: Config, *, once: bool, background: bool = False
+) -> None:
     api = HttpTelegram()
     generator = OllamaGenerator(config.inference) if config.inference.model else None
     # No effect adapter is registered, so approved actions stay blocked until one is added.
@@ -318,9 +328,26 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
+    background_tasks: list[asyncio.Task[None]] = []
     try:
         if not await bot.store.polling_allowed(now()):
             raise BoundaryError("not_paired_run_pair_first")
+        if background:
+            # Opt-in work: board collection every time something is due, plus the digest and
+            # alerts (which do nothing until switched on in Settings).
+            assert bot.ui.digest_service is not None
+            scheduler = Scheduler(
+                db=database,
+                api=api,
+                digest=bot.ui.digest_service,
+                linkedin=commands,
+                timezone=config.timezone,
+                message_interval_minutes=max(30, config.linkedin.inbox_interval_minutes),
+            )
+            background_tasks = [
+                asyncio.create_task(monitor_loop(lambda: run_one(database, http), stop)),
+                asyncio.create_task(run_scheduler(scheduler, stop)),
+            ]
         while not stop.is_set():
             polling = asyncio.ensure_future(poll_once(bot, api))
             waiting = asyncio.ensure_future(stop.wait())
@@ -333,6 +360,8 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
             if once:
                 break
     finally:
+        stop.set()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
         await session.close()
         await http.close()
         await api.close()
