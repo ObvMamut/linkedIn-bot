@@ -217,7 +217,7 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
     try:
-        if await bot.store.binding() is None:
+        if not await bot.store.polling_allowed(now()):
             raise BoundaryError("not_paired_run_pair_first")
         while not stop.is_set():
             polling = asyncio.ensure_future(poll_once(bot, api))

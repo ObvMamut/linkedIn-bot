@@ -385,3 +385,15 @@ def test_resolve_records_user_attestation_for_unknown_outcomes(tmp_path):
         assert used["communication"] == 0  # a confirmed no-effect frees the slot
 
     run(tmp_path, scenario)
+
+
+def test_polling_is_allowed_while_a_pairing_code_is_pending(tmp_path):
+    async def scenario(db, api, bot, store):
+        assert await store.polling_allowed(now()) is False  # nothing to listen for
+        code = await store.begin_pairing(now())
+        assert await store.polling_allowed(now()) is True
+        assert await store.polling_allowed(now() + timedelta(minutes=11)) is False
+        await bot.handle(update(1, f"/start {code}"))
+        assert await store.polling_allowed(now() + timedelta(days=1)) is True  # paired
+
+    run(tmp_path, scenario)

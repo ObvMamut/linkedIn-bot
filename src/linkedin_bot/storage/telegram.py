@@ -62,6 +62,13 @@ class TelegramStore:
         )
         return None if row[0] is None else (row[0], row[1])
 
+    async def polling_allowed(self, at: datetime) -> bool:
+        """Listen only when paired or while an unexpired pairing code is waiting."""
+        user, expires = await self.database.call(
+            lambda c: c.execute("SELECT user_id,code_expires_at FROM telegram_binding").fetchone()
+        )
+        return user is not None or (expires is not None and at <= datetime.fromisoformat(expires))
+
     async def last_update_id(self) -> int:
         return await self.database.call(
             lambda c: c.execute("SELECT last_update_id FROM telegram_binding").fetchone()[0]
