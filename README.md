@@ -52,7 +52,7 @@ Use `run --once` to process at most one due item. Ctrl-C or SIGTERM stops claims
 the bounded current read, closes clients/storage, and releases the kernel-held lock.
 ## Telegram (M2)
 
-Create a bot with BotFather and export `TELEGRAM_BOT_TOKEN` in your shell (never in a file
+Create a bot with BotFather and export `LINKEDIN_AUTOMATION_BOT_TOKEN` in your shell (never in a file
 or chat). Then:
 
 ```sh
@@ -124,7 +124,7 @@ source access. This execution environment required approved unsandboxed runs for
 wakeups, browser sockets, and network checks; see the [measured evidence](docs/feasibility/M0-M1-2026-10-01.md).
 
 Next is M2: Telegram private-chat pairing and resumable onboarding. Set a locally stored
-`TELEGRAM_BOT_TOKEN` from BotFather when that milestone is implemented; do not send tokens
+`LINKEDIN_AUTOMATION_BOT_TOKEN` from BotFather when that milestone is implemented; do not send tokens
 in chat. LinkedIn needs user-completed login in a dedicated profile and an expected account
 identity before read gates. Supply job goals, a baseline CV, and confirm extracted facts
 through onboarding. Ollama must be explicitly started by the user before model inventory

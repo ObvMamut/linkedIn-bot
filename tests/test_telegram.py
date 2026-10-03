@@ -194,9 +194,12 @@ def test_poll_once_advances_offset_and_handles_batch(tmp_path):
 def test_http_telegram_requires_token_from_environment(monkeypatch):
     from linkedin_bot.adapters.telegram import HttpTelegram
 
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("LINKEDIN_AUTOMATION_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:generic-name-must-be-ignored")
     with pytest.raises(BoundaryError, match="telegram_token_missing"):
         HttpTelegram()
+    monkeypatch.setenv("LINKEDIN_AUTOMATION_BOT_TOKEN", "123:specific")
+    assert HttpTelegram()._base.endswith("bot123:specific")
 
 
 def test_opportunities_command_lists_ranked_matches_with_reasons(tmp_path):

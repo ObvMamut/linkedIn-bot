@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from linkedin_bot.runtime.privacy import BoundaryError
 
 API = "https://api.telegram.org"
-TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+TOKEN_ENV = "LINKEDIN_AUTOMATION_BOT_TOKEN"
 
 
 class Wire(BaseModel):

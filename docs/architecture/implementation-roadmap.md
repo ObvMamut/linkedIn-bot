@@ -26,7 +26,7 @@ ranks. M5 needs M4 drafts and M2 approvals. M6 needs M5 and a clean pilot review
 
 ## Live inputs only the user can supply
 
-Telegram bot token (`TELEGRAM_BOT_TOKEN`), job goals and baseline CV, authorization to
+Telegram bot token (`LINKEDIN_AUTOMATION_BOT_TOKEN`), job goals and baseline CV, authorization to
 start Ollama and download a model, and a manual LinkedIn login in the application-owned
 browser profile. Code for each milestone is verified against fakes and fixtures; the live
 gates stay pending until these exist.
