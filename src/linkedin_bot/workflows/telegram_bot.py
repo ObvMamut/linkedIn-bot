@@ -1,7 +1,10 @@
 """Authorize every update, then run commands and the resumable onboarding journey."""
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
+
+import httpx
 
 from linkedin_bot.adapters.public_http import AdapterError
 from linkedin_bot.adapters.telegram import (
@@ -22,6 +25,7 @@ from linkedin_bot.domain.models import (
     identifier,
     now,
 )
+from linkedin_bot.runtime.privacy import BoundaryError
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.workflows.digest import DigestService
@@ -357,3 +361,33 @@ async def poll_once(bot: Bot, api: TelegramPoller, poll_seconds: int = 30) -> in
     for update in updates:
         await bot.handle(update)
     return len(updates)
+
+
+async def poll_forever(
+    bot: Bot,
+    api: TelegramPoller,
+    stop: asyncio.Event,
+    *,
+    once: bool = False,
+    backoff: float = 5.0,
+) -> None:
+    """Poll until asked to stop. Network errors back off and retry instead of ending the bot."""
+    while not stop.is_set():
+        polling = asyncio.ensure_future(poll_once(bot, api))
+        waiting = asyncio.ensure_future(stop.wait())
+        await asyncio.wait({polling, waiting}, return_when=asyncio.FIRST_COMPLETED)
+        waiting.cancel()
+        if not polling.done():
+            polling.cancel()
+            return
+        try:
+            polling.result()
+        except httpx.HTTPError, BoundaryError:
+            logging.warning("", extra={"event": "telegram_poll_failed"})
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=backoff)
+            except TimeoutError:
+                pass
+            continue
+        if once:
+            return

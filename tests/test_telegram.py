@@ -532,3 +532,35 @@ def test_get_updates_asks_for_messages_and_callbacks():
 
     asyncio.run(go())
     assert seen[0]["allowed_updates"] == ["message", "callback_query"]
+
+
+def test_poll_loop_survives_network_errors_and_stops_on_request(tmp_path):
+    import httpx
+
+    from linkedin_bot.workflows.telegram_bot import poll_forever
+
+    class Flaky(FakeAPI):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def get_updates(self, offset, poll_seconds=30):
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ReadTimeout("slow network")
+            if self.calls == 2:
+                raise BoundaryError("telegram_http_status")
+            await asyncio.sleep(0.01)
+            return []
+
+    async def scenario(db, api, bot, store):
+        flaky = Flaky()
+        bot = Bot(db, flaky)
+        stop = asyncio.Event()
+        task = asyncio.create_task(poll_forever(bot, flaky, stop, backoff=0.01))
+        await asyncio.sleep(0.2)
+        assert flaky.calls >= 4  # kept polling after both failures
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+
+    run(tmp_path, scenario)

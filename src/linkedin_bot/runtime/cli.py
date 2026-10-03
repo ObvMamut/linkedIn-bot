@@ -41,7 +41,7 @@ from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.serve import Scheduler, monitor_loop, run_scheduler
-from linkedin_bot.workflows.telegram_bot import Bot, poll_once
+from linkedin_bot.workflows.telegram_bot import Bot, poll_forever
 
 
 def emit(content: object) -> None:
@@ -348,17 +348,7 @@ async def telegram_foreground(
                 asyncio.create_task(monitor_loop(lambda: run_one(database, http), stop)),
                 asyncio.create_task(run_scheduler(scheduler, stop)),
             ]
-        while not stop.is_set():
-            polling = asyncio.ensure_future(poll_once(bot, api))
-            waiting = asyncio.ensure_future(stop.wait())
-            await asyncio.wait({polling, waiting}, return_when=asyncio.FIRST_COMPLETED)
-            waiting.cancel()
-            if not polling.done():
-                polling.cancel()
-                break
-            polling.result()
-            if once:
-                break
+        await poll_forever(bot, api, stop, once=once)
     finally:
         stop.set()
         await asyncio.gather(*background_tasks, return_exceptions=True)
