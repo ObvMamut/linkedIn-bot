@@ -24,6 +24,7 @@ class LinkedInConfig(Contract):
 
 class InferenceConfig(Contract):
     local_endpoint: str = "http://127.0.0.1:11434"
+    model: str | None = None
     max_concurrency: Literal[1] = 1
     task_deadline_seconds: int = Field(default=300, ge=1, le=300)
 

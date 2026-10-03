@@ -3,6 +3,7 @@
 import logging
 from datetime import datetime, timedelta
 
+from linkedin_bot.adapters.public_http import AdapterError
 from linkedin_bot.adapters.telegram import TelegramAPI, TelegramPoller, Update
 from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
@@ -15,6 +16,7 @@ from linkedin_bot.domain.models import (
 )
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows.materials import Generator, draft_cover_letter
 
 STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
 PROMPTS = {
@@ -28,6 +30,7 @@ MODE_LINE = "Mode: draft_only. Nothing is sent to employers; application and mes
 HELP = (
     "/start resume onboarding\n/status show mode and progress\n"
     "/opportunities show ranked matches from collected postings\n"
+    "/prepare <id> draft a cover letter for review\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
 )
 
@@ -37,9 +40,12 @@ def split(text: str) -> tuple[str, ...]:
 
 
 class Bot:
-    def __init__(self, database: Database, api: TelegramAPI) -> None:
+    def __init__(
+        self, database: Database, api: TelegramAPI, generator: Generator | None = None
+    ) -> None:
         self.db = database
         self.api = api
+        self.generator = generator
         self.store = TelegramStore(database)
 
     async def handle(self, update: Update) -> None:
@@ -75,6 +81,8 @@ class Bot:
             )
         elif command == "/opportunities":
             await self._reply(chat_id, await self._opportunities())
+        elif command == "/prepare":
+            await self._reply(chat_id, await self._prepare(text.split()[1:]))
         elif command == "/pause":
             await self.db.pause(True)
             await self._reply(chat_id, "Paused.")
@@ -95,11 +103,28 @@ class Bot:
             return "No matches yet. Collect boards and finish onboarding first."
         return "\n\n".join(
             f"{m.title} ({m.location or 'location unknown'}) score {m.score}\n"
+            f"Id: {m.source}:{m.external_id}\n"
             f"Why: {', '.join(m.reasons)}"
             + (f"\nGaps: {', '.join(m.gaps)}" if m.gaps else "")
             + f"\n{m.url}"
             for m in matches
         )
+
+    async def _prepare(self, arguments: list[str]) -> str:
+        if self.generator is None:
+            return "No local model is configured (inference.model). Nothing was drafted."
+        if len(arguments) != 1:
+            return "Usage: /prepare <source>:<id>, as shown by /opportunities."
+        postings = await self.db.opportunities(since=None)
+        posting = next((p for p in postings if f"{p.source}:{p.external_id}" == arguments[0]), None)
+        if posting is None:
+            return "Unknown opportunity."
+        try:
+            artifact = await draft_cover_letter(self.db, self.generator, posting)
+        except AdapterError as exc:
+            return f"Draft not produced: {exc.code}. Nothing was saved."
+        text = (self.db.root / artifact.relative_path).read_text()
+        return f"Draft for review (not sent anywhere):\n\n{text}"
 
     async def _prompt(self) -> str:
         step, _ = await self.store.onboarding()

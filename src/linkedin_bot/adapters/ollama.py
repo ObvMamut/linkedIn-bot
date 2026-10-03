@@ -89,3 +89,43 @@ class OllamaProbe:
                 "qualification": "single probe; M4 evaluation gate remains pending",
                 "answer": json.loads(answer.model_dump_json()),
             }
+
+
+class OllamaGenerator:
+    """Local structured generation for the evaluated model named in the config."""
+
+    def __init__(self, config: InferenceConfig, transport: httpx.AsyncBaseTransport | None = None):
+        if not config.model:
+            raise AdapterError("model_not_configured")
+        self.config = config
+        self.client = httpx.AsyncClient(
+            base_url=config.local_endpoint, timeout=5, trust_env=False, transport=transport
+        )
+        self.lane = asyncio.Lock()
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    async def generate(self, prompt: str, schema: dict[str, object]) -> str:
+        async with self.lane:
+            try:
+                async with asyncio.timeout(self.config.task_deadline_seconds):
+                    response = await self.client.post(
+                        "/api/generate",
+                        json={
+                            "model": self.config.model,
+                            "stream": False,
+                            "keep_alive": 0,
+                            "format": schema,
+                            "prompt": prompt,
+                            "options": {"num_ctx": 4096, "num_predict": 800, "temperature": 0},
+                        },
+                        timeout=self.config.task_deadline_seconds,
+                    )
+                    response.raise_for_status()
+                    output = response.json()
+                    if output.get("done") is not True or not isinstance(output["response"], str):
+                        raise ValueError("truncated")
+                    return output["response"]
+            except (httpx.HTTPError, TimeoutError, KeyError, ValueError) as exc:
+                raise AdapterError("inference_failed") from exc

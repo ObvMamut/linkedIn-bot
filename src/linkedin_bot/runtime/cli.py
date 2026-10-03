@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from linkedin_bot.adapters.ats import ATSSource, Board, Provider
 from linkedin_bot.adapters.browser_probe import browser_smoke
-from linkedin_bot.adapters.ollama import OllamaProbe
+from linkedin_bot.adapters.ollama import OllamaGenerator, OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
 from linkedin_bot.adapters.telegram import HttpTelegram
 from linkedin_bot.domain.models import identifier, now
@@ -155,7 +155,7 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                     }
                 )
             elif args.command == "telegram":
-                await telegram_foreground(database, once=args.once)
+                await telegram_foreground(database, config, once=args.once)
                 emit({"stopped": True})
             elif args.command == "run":
                 await foreground(database, once=args.once)
@@ -206,9 +206,10 @@ async def foreground(database: Database, *, once: bool) -> None:
             loop.remove_signal_handler(signum)
 
 
-async def telegram_foreground(database: Database, *, once: bool) -> None:
+async def telegram_foreground(database: Database, config: Config, *, once: bool) -> None:
     api = HttpTelegram()
-    bot = Bot(database, api)
+    generator = OllamaGenerator(config.inference) if config.inference.model else None
+    bot = Bot(database, api, generator)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -229,6 +230,8 @@ async def telegram_foreground(database: Database, *, once: bool) -> None:
                 break
     finally:
         await api.close()
+        if generator is not None:
+            await generator.close()
         for signum in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(signum)
 

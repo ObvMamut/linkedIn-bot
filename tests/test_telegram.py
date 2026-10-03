@@ -230,3 +230,50 @@ def test_opportunities_command_lists_ranked_matches_with_reasons(tmp_path):
         assert "role matches" in reply
 
     run(tmp_path, scenario)
+
+
+def test_prepare_command_drafts_for_review_and_reports_missing_model(tmp_path):
+    import json
+
+    from linkedin_bot.domain.models import CandidateFact, CollectionPage, SourceObservation, digest
+
+    class Gen:
+        async def generate(self, prompt, schema):
+            text = "I used Python and SQL at Acme."
+            return json.dumps({"paragraphs": [{"text": text, "fact_ids": [fact_id]}]})
+
+    fact_id = "f1"
+
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await bot.handle(update(2, "/prepare lever:x1"))
+        assert "No local model" in api.sent[-1][1]
+        bot = Bot(db, api, Gen())
+        await db.save_fact(
+            CandidateFact(
+                id=fact_id,
+                kind="skill",
+                value="Python and SQL at Acme",
+                source_reference="t",
+                status="confirmed",
+                confirmed_at=now(),
+            )
+        )
+        await db.schedule("w", "{}", now(), 3600)
+        work = await db.claim(now(), "w")
+        item = SourceObservation(
+            source="lever",
+            external_id="x1",
+            url="https://jobs.lever.co/acme/x1",
+            title="Data Scientist",
+            content_hash=digest(b"x1"),
+        )
+        await db.persist_page(work, CollectionPage(items=(item,), coverage="complete"), now())
+        await bot.handle(update(3, "/prepare lever:missing"))
+        assert "Unknown opportunity" in api.sent[-1][1]
+        await bot.handle(update(4, "/prepare lever:x1"))
+        assert "not sent anywhere" in api.sent[-1][1] and "Python and SQL" in api.sent[-1][1]
+        assert (await db.status())["artifacts"] == 1
+
+    run(tmp_path, scenario)
