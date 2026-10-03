@@ -1,3 +1,4 @@
+# ruff: noqa: E501  (fixture text)
 import asyncio
 from datetime import timedelta
 
@@ -16,9 +17,44 @@ USER, CHAT = 111, 222
 class FakeAPI:
     def __init__(self):
         self.sent: list[tuple[int, str]] = []
+        self.markups: list[dict | None] = []
+        self.edits: list[tuple[int, int, str, dict | None]] = []
+        self.answers: list[tuple[str, str]] = []
+        self.actions: list[tuple[int, str]] = []
+        self._next_id = 100
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, markup: dict | None = None) -> int:
         self.sent.append((chat_id, text))
+        self.markups.append(markup)
+        self._next_id += 1
+        return self._next_id
+
+    async def edit_message(
+        self, chat_id: int, message_id: int, text: str, markup: dict | None = None
+    ) -> None:
+        self.edits.append((chat_id, message_id, text, markup))
+
+    async def answer_callback(self, callback_id: str, text: str = "") -> None:
+        self.answers.append((callback_id, text))
+
+    async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        self.actions.append((chat_id, action))
+
+
+def callback(
+    update_id, data, user=USER, chat=CHAT, message_id=500, chat_type="private", callback_id="cb"
+):
+    return Update.model_validate(
+        {
+            "update_id": update_id,
+            "callback_query": {
+                "id": f"{callback_id}{update_id}",
+                "from": {"id": user},
+                "data": data,
+                "message": {"message_id": message_id, "chat": {"id": chat, "type": chat_type}},
+            },
+        }
+    )
 
 
 def update(update_id, text, user=USER, chat=CHAT, chat_type="private"):
@@ -400,3 +436,99 @@ def test_polling_is_allowed_while_a_pairing_code_is_pending(tmp_path):
         assert await store.polling_allowed(now() + timedelta(days=1)) is True  # paired
 
     run(tmp_path, scenario)
+
+
+def test_parse_updates_keeps_callback_queries_and_drops_malformed_ones():
+    parsed = parse_updates(
+        {
+            "ok": True,
+            "result": [
+                {
+                    "update_id": 5,
+                    "callback_query": {
+                        "id": "abc",
+                        "from": {"id": 1},
+                        "data": "m:main",
+                        "message": {"message_id": 9, "chat": {"id": 2, "type": "private"}},
+                    },
+                },
+                {"update_id": 6, "callback_query": {"id": "x"}},
+            ],
+        }
+    )
+    assert (
+        parsed[0].callback_query.data == "m:main"
+        and parsed[0].callback_query.message.message_id == 9
+    )
+    assert parsed[1].callback_query is None  # malformed: no sender, but the offset still advances
+
+
+def test_http_telegram_sends_edits_answers_and_tolerates_unchanged_edits():
+    import json
+
+    import httpx
+
+    from linkedin_bot.adapters.telegram import HttpTelegram
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        method = request.url.path.rsplit("/", 1)[1]
+        calls.append((method, body))
+        if method == "editMessageText" and body.get("text") == "same":
+            return httpx.Response(
+                400, json={"ok": False, "description": "Bad Request: message is not modified"}
+            )
+        if method == "editMessageText" and body.get("text") == "gone":
+            return httpx.Response(
+                400, json={"ok": False, "description": "message to edit not found"}
+            )
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
+
+    async def go():
+        api = HttpTelegram("123:token", transport=httpx.MockTransport(handler))
+        markup = {"inline_keyboard": [[{"text": "Go", "callback_data": "m:main"}]]}
+        assert await api.send_message(5, "hi", markup) == 77
+        await api.edit_message(5, 77, "new", markup)
+        await api.edit_message(5, 77, "same", markup)  # Telegram refuses identical text; fine
+        with pytest.raises(BoundaryError, match="telegram_edit_failed"):
+            await api.edit_message(5, 77, "gone", markup)
+        await api.answer_callback("cb1", "Pinned")
+        await api.send_chat_action(5, "typing")
+        await api.close()
+
+    asyncio.run(go())
+    methods = [m for m, _ in calls]
+    assert methods == [
+        "sendMessage",
+        "editMessageText",
+        "editMessageText",
+        "editMessageText",
+        "answerCallbackQuery",
+        "sendChatAction",
+    ]
+    assert calls[0][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "m:main"
+    assert calls[4][1] == {"callback_query_id": "cb1", "text": "Pinned"}
+
+
+def test_get_updates_asks_for_messages_and_callbacks():
+    import json
+
+    import httpx
+
+    from linkedin_bot.adapters.telegram import HttpTelegram
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    async def go():
+        api = HttpTelegram("123:token", transport=httpx.MockTransport(handler))
+        await api.get_updates(1, 0)
+        await api.close()
+
+    asyncio.run(go())
+    assert seen[0]["allowed_updates"] == ["message", "callback_query"]

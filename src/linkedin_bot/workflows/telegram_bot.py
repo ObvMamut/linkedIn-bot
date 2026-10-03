@@ -4,7 +4,13 @@ import logging
 from datetime import datetime, timedelta
 
 from linkedin_bot.adapters.public_http import AdapterError
-from linkedin_bot.adapters.telegram import TelegramAPI, TelegramPoller, Update
+from linkedin_bot.adapters.telegram import (
+    CallbackQuery,
+    Chat,
+    TelegramAPI,
+    TelegramPoller,
+    Update,
+)
 from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
     MAX_DAILY_APPLICATIONS,
@@ -21,6 +27,7 @@ from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
+from linkedin_bot.workflows.ui.router import UI, BoardFinder
 
 STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
 PROMPTS = {
@@ -39,6 +46,7 @@ HELP = (
     "/approve <id>, /reject <id> decide one proposed action\n"
     "/policy show or change mode and daily caps (changes need 'confirm')\n"
     "/resolve <action> success|none <note> record what you saw for an unknown outcome\n"
+    "/menu open the button menu (messages, search, pinned, jobs, saved, settings)\n"
     "/li_status /li_messages /li_search /li_profile read-only LinkedIn access\n"
     "/li_release free the browser profile (before `linkedin login`)\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
@@ -57,6 +65,7 @@ class Bot:
         generator: Generator | None = None,
         executor: Executor | None = None,
         linkedin: LinkedInCommands | None = None,
+        board_finder: BoardFinder | None = None,
     ) -> None:
         self.db = database
         self.api = api
@@ -64,16 +73,27 @@ class Bot:
         self.executor = executor or Executor(database)
         self.linkedin = linkedin
         self.store = TelegramStore(database)
+        self.ui = UI(database, api, linkedin, board_finder, llm_enabled=generator is not None)
 
     async def handle(self, update: Update) -> None:
         if update.update_id <= await self.store.last_update_id():
             return
         message = update.message
+        query = update.callback_query
         try:
             if message is not None and message.chat.type == "private" and message.text:
                 await self._dispatch(message.sender.id, message.chat.id, message.text.strip())
+            elif query is not None and query.data and query.message is not None:
+                await self._press(query.sender.id, query.message.chat, query)
         finally:
             await self.store.record_update(update.update_id)
+
+    async def _press(self, user_id: int, chat: Chat, query: CallbackQuery) -> None:
+        """Buttons get the same authorisation as messages: the paired user in the paired chat."""
+        if chat.type != "private" or await self.store.binding() != (user_id, chat.id):
+            return
+        assert query.message is not None and query.data is not None
+        await self.ui.on_callback(chat.id, query.message.message_id, query.id, query.data)
 
     async def _dispatch(self, user_id: int, chat_id: int, text: str) -> None:
         binding = await self.store.binding()
@@ -86,6 +106,11 @@ class Bot:
         if binding != (user_id, chat_id):
             return  # Strangers get no reply and cannot learn that the bot is paired.
         command = text.split()[0] if text.startswith("/") else None
+        if command == "/menu":
+            await self.ui.open_menu(chat_id)
+            return
+        if command is None and await self.ui.handle_text(chat_id, text):
+            return
         if command == "/start":
             await self._reply(chat_id, await self._prompt())
         elif command == "/status":
@@ -130,7 +155,8 @@ class Bot:
 
     async def _opportunities(self) -> str:
         recent = await self.db.opportunities(since=now() - timedelta(days=14))
-        matches = rank(recent, await self.db.preferences())[:5]
+        pinned = await self.ui.store.pinned_tokens()
+        matches = rank(recent, await self.db.preferences(), pinned)[:5]
         if not matches:
             return "No matches yet. Collect boards and finish onboarding first."
         return "\n\n".join(

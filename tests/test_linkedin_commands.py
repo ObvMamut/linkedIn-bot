@@ -25,7 +25,7 @@ SECRET = "Are you free Tuesday for the confidential offer?"
 
 class FakeConnector:
     def __init__(self, error=None, state="ready", conversations=None):
-        self.error, self.state, self.calls = error, state, []
+        self.error, self.state, self.calls, self.refreshes = error, state, [], []
         self.conversations = conversations or (
             Conversation(id="0", title="Jane Doe", snippet=SECRET, unread=True, when="Sep 30"),
             Conversation(id="2", title="Acme", snippet="Thanks", unread=False),
@@ -40,24 +40,25 @@ class FakeConnector:
         self._maybe_fail()
         return self.state
 
-    async def messages(self, count):
+    async def messages(self, count, **kw):
+        self.refreshes.append(kw.get("refresh", False))
         self.calls.append(("messages", count))
         self._maybe_fail()
         return Parsed(self.conversations[:count], 1)
 
-    async def search_people(self, query):
+    async def search_people(self, query, **kw):
         self.calls.append(("people", query))
         self._maybe_fail()
         return Parsed(
             (Person(url="https://www.linkedin.com/in/jane", name="Jane", headline="ML"),), 0
         )
 
-    async def search_companies(self, query):
+    async def search_companies(self, query, **kw):
         self.calls.append(("firms", query))
         self._maybe_fail()
         return Parsed((Company(url="https://www.linkedin.com/company/acme", name="Acme"),), 0)
 
-    async def profile(self, target):
+    async def profile(self, target, **kw):
         self.calls.append(("profile", target))
         self._maybe_fail()
         return Profile(

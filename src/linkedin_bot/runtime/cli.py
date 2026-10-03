@@ -36,6 +36,7 @@ from linkedin_bot.storage.database import Database, RevisionConflict, SchemaErro
 from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows.boards import find_board, public_probe
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.monitor import run_one
@@ -300,7 +301,19 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
         idle_seconds=config.linkedin.idle_close_seconds,
     )
     commands = LinkedInCommands(session.use, LinkedInStore(database), release=session.close)
-    bot = Bot(database, api, generator, Executor(database, timezone=config.timezone), commands)
+    http = PublicHTTP()
+
+    async def board_finder(name: str) -> tuple[str, str] | None:
+        return await find_board(name, public_probe(http))
+
+    bot = Bot(
+        database,
+        api,
+        generator,
+        Executor(database, timezone=config.timezone),
+        commands,
+        board_finder,
+    )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -321,6 +334,7 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
                 break
     finally:
         await session.close()
+        await http.close()
         await api.close()
         if generator is not None:
             await generator.close()

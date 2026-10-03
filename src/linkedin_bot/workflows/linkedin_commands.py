@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from linkedin_bot.adapters.linkedin.models import (
     Company,
@@ -17,6 +17,7 @@ from linkedin_bot.adapters.linkedin.pages import Parsed
 from linkedin_bot.domain.models import now
 from linkedin_bot.storage.linkedin import LinkedInStore
 
+T = TypeVar("T")
 LAYOUT_VERIFIED = "2026-10-03"  # last live check of the page parsers; None if unchecked
 LIMIT = 3900
 LOGIN_HINT = "Run `linkedin-bot linkedin login` on the machine and sign in once."
@@ -29,10 +30,10 @@ USAGE = {
 
 class Connector(Protocol):
     async def status(self) -> SessionState: ...
-    async def messages(self, count: int) -> Parsed[Conversation]: ...
-    async def search_people(self, query: str) -> Parsed[Person]: ...
-    async def search_companies(self, query: str) -> Parsed[Company]: ...
-    async def profile(self, target: str | None) -> Profile: ...
+    async def messages(self, count: int, *, refresh: bool = False) -> Parsed[Conversation]: ...
+    async def search_people(self, query: str, *, refresh: bool = False) -> Parsed[Person]: ...
+    async def search_companies(self, query: str, *, refresh: bool = False) -> Parsed[Company]: ...
+    async def profile(self, target: str | None, *, refresh: bool = False) -> Profile: ...
 
 
 Opener = Callable[[], AbstractAsyncContextManager[Connector]]
@@ -96,19 +97,24 @@ class LinkedInCommands:
             if self.release is not None:
                 await self.release()
             return "Browser released. You can run `linkedin-bot linkedin login` now."
+        result, error = await self.fetch(lambda connector: self.run(connector, command, rest))
+        return clip(result, LIMIT) if result is not None else (error or "")
+
+    async def fetch(self, call: Callable[[Connector], Awaitable[T]]) -> tuple[T | None, str | None]:
+        """Run `call` on the connector. Returns (result, None) or (None, short user message)."""
         try:
             async with self.opener() as connector:
-                reply = await self.run(connector, command, rest)
+                result = await call(connector)
             await self.store.record("ready", now())
-            return clip(reply, LIMIT)
+            return result, None
         except LinkedInError as error:
             if error.code in ("auth_required", "challenge_required", "unavailable"):
                 await self.store.record(error.code, now())
             logging.warning("", extra={"event": f"linkedin_{error.code}"})
-            return explain(error)
+            return None, explain(error)
         except Exception:
             logging.warning("", extra={"event": "linkedin_failed"})
-            return explain(LinkedInError("unavailable"))
+            return None, explain(LinkedInError("unavailable"))
 
     async def run(self, connector: Connector, command: str, rest: str) -> str:
         if command == "/li_status":
