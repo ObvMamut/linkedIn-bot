@@ -1,6 +1,8 @@
 # Local job-search agent
 
-M0 feasibility work, M1 foundations and M2 Telegram pairing/onboarding are implemented. This is a Linux, single-user,
+M0 feasibility work, M1 foundations, M2 Telegram onboarding, M3 matching, M4 grounded
+drafting and the M5 approval/quota machinery are implemented. No effect adapter and no LinkedIn
+connector exist, so nothing can be sent to an employer. This is a Linux, single-user,
 foreground Python application. LinkedIn monitoring, evaluated
 inference, materials generation, and employer-facing execution belong to later milestones.
 The architecture and its requirements remain in [docs/architecture](docs/architecture/README.md).
@@ -58,6 +60,11 @@ uv run linkedin-bot pair        # prints a one-use code, valid ten minutes
 # send "/start <code>" to the bot from a private chat
 uv run linkedin-bot telegram    # foreground long polling; --once handles one batch
 ```
+
+Commands: `/opportunities` (ranked matches with reasons), `/prepare <id>` (cover-letter draft for
+review; needs `inference.model` and a running local Ollama), `/pending`, `/approve <id>`,
+`/reject <id>`, `/policy` (mode and daily caps, changes need `confirm`, hard ceilings 10
+applications and 5 messages per day), `/resolve <action> success|none <note>`, `/pause`, `/resume`.
 
 Only the paired user and private chat are answered; everyone else is silently ignored.
 Onboarding (roles, locations, exclusions, work eligibility, pasted CV) is resumable and

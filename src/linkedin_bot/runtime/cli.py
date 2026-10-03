@@ -23,6 +23,7 @@ from linkedin_bot.runtime.privacy import BoundaryError, configure_logging
 from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.telegram_bot import Bot, poll_once
 
@@ -209,7 +210,8 @@ async def foreground(database: Database, *, once: bool) -> None:
 async def telegram_foreground(database: Database, config: Config, *, once: bool) -> None:
     api = HttpTelegram()
     generator = OllamaGenerator(config.inference) if config.inference.model else None
-    bot = Bot(database, api, generator)
+    # No effect adapter is registered, so approved actions stay blocked until one is added.
+    bot = Bot(database, api, generator, Executor(database, timezone=config.timezone))
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):

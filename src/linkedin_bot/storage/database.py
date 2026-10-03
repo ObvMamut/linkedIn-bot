@@ -545,6 +545,37 @@ class Database:
 
         await self.call(write)
 
+    async def resolve_unknown(self, action_id: str, effect_happened: bool, note: str) -> bool:
+        """Record the user's inspected outcome, kept distinct from connector evidence."""
+
+        def write(connection: sqlite3.Connection) -> bool:
+            with transaction(connection):
+                attempt = connection.execute(
+                    "SELECT t.id FROM attempts t JOIN actions a ON a.id=t.action_id "
+                    "AND a.revision=t.revision WHERE a.id=? AND a.state='unknown' "
+                    "AND t.outcome='unknown' ORDER BY t.rowid DESC LIMIT 1",
+                    (action_id,),
+                ).fetchone()
+                if attempt is None:
+                    return False
+                outcome = "succeeded" if effect_happened else "failed"
+                connection.execute(
+                    "UPDATE attempts SET outcome=?,reason_code='user_attested',"
+                    "evidence_reference=? WHERE id=?",
+                    (outcome, f"user_attestation:{note}", attempt[0]),
+                )
+                connection.execute(
+                    "UPDATE actions SET state=?,reason_code='user_attested' WHERE id=?",
+                    (outcome, action_id),
+                )
+                if not effect_happened:
+                    connection.execute(
+                        "UPDATE reservations SET released=1 WHERE attempt_id=?", (attempt[0],)
+                    )
+                return True
+
+        return await self.call(write)
+
     async def recover(self) -> dict[str, int]:
         def write(connection: sqlite3.Connection) -> dict[str, int]:
             with transaction(connection):

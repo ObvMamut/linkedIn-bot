@@ -277,3 +277,111 @@ def test_prepare_command_drafts_for_review_and_reports_missing_model(tmp_path):
         assert (await db.status())["artifacts"] == 1
 
     run(tmp_path, scenario)
+
+
+def effect_setup(adapter_result="succeeded"):
+    from linkedin_bot.domain.models import ActionResult, ActionSnapshot
+    from linkedin_bot.workflows.executor import Executor
+
+    class Adapter:
+        calls = 0
+
+        async def perform(self, action):
+            Adapter.calls += 1
+            return ActionResult(outcome=adapter_result, reason_code="done")
+
+    def action(key="reply:1", policy_revision=3):
+        return ActionSnapshot(
+            kind="send_reply",
+            target="someone",
+            logical_key=key,
+            content="Hi there",
+            profile_revision=1,
+            preferences_revision=1,
+            policy_revision=policy_revision,
+        )
+
+    return Adapter, action, Executor
+
+
+def test_policy_changes_need_confirmation_and_respect_hard_ceilings(tmp_path):
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await bot.handle(update(2, "/policy cap communication 2"))
+        assert "confirm" in api.sent[-1][1] and (await db.policy()).communication_cap == 0
+        await bot.handle(update(3, "/policy cap communication 99 confirm"))
+        assert "ceiling" in api.sent[-1][1] and (await db.policy()).communication_cap == 0
+        await bot.handle(update(4, "/policy cap communication 2 confirm"))
+        await bot.handle(update(5, "/policy mode reviewed confirm"))
+        policy = await db.policy()
+        assert (policy.communication_cap, policy.mode, policy.revision) == (2, "reviewed", 3)
+
+    run(tmp_path, scenario)
+
+
+def test_pending_approve_and_reject_flow_dispatches_only_after_approval(tmp_path):
+    Adapter, action, Executor = effect_setup()
+
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await bot.handle(update(2, "/policy cap communication 2 confirm"))
+        await bot.handle(update(3, "/policy mode reviewed confirm"))
+        executor = Executor(db, {"send_reply": Adapter()})
+        bot = Bot(db, api, executor=executor)
+        first, second = action(), action("reply:2")
+        assert await executor.propose(first) == () and await executor.propose(second) == ()
+        await bot.handle(update(4, "/pending"))
+        listing = api.sent[-1][1]
+        approve_id = await executor.approval_id(first.id)
+        reject_id = await executor.approval_id(second.id)
+        assert approve_id in listing and "Hi there" in listing and Adapter.calls == 0
+        await bot.handle(update(5, f"/reject {reject_id}"))
+        assert "Rejected" in api.sent[-1][1] and Adapter.calls == 0
+        await bot.handle(update(6, f"/approve {approve_id}"))
+        assert Adapter.calls == 1 and "succeeded" in api.sent[-1][1].lower()
+        await bot.handle(update(7, f"/approve {approve_id}"))
+        assert Adapter.calls == 1 and "no longer valid" in api.sent[-1][1].lower()
+
+    run(tmp_path, scenario)
+
+
+def test_default_install_cannot_dispatch_even_if_everything_is_approved(tmp_path):
+    Adapter, action, Executor = effect_setup()
+
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        executor = Executor(db, {"send_reply": Adapter()})
+        assert "zero_outbound_cap" in await executor.propose(action(policy_revision=1))
+        await bot.handle(update(2, "/pending"))
+        assert "Nothing waiting" in api.sent[-1][1] and Adapter.calls == 0
+
+    run(tmp_path, scenario)
+
+
+def test_resolve_records_user_attestation_for_unknown_outcomes(tmp_path):
+    Adapter, action, Executor = effect_setup("unknown")
+
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await bot.handle(update(2, "/policy cap communication 1 confirm"))
+        await bot.handle(update(3, "/policy mode reviewed confirm"))
+        executor = Executor(db, {"send_reply": Adapter()})
+        bot = Bot(db, api, executor=executor)
+        item = action()
+        await executor.propose(item)
+        await bot.handle(update(4, f"/approve {await executor.approval_id(item.id)}"))
+        assert await executor.state("reply:1") == "unknown"
+        await bot.handle(update(5, "/pending"))
+        assert item.id in api.sent[-1][1]
+        await bot.handle(update(6, f"/resolve {item.id} none"))
+        assert "evidence note" in api.sent[-1][1]
+        await bot.handle(update(7, f"/resolve {item.id} none sent folder shows nothing"))
+        assert await executor.state("reply:1") == "failed"
+        used = await db.used_today(executor.local_date(now()))
+        assert used["communication"] == 0  # a confirmed no-effect frees the slot
+
+    run(tmp_path, scenario)

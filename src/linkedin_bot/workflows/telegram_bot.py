@@ -7,6 +7,8 @@ from linkedin_bot.adapters.public_http import AdapterError
 from linkedin_bot.adapters.telegram import TelegramAPI, TelegramPoller, Update
 from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
+    MAX_DAILY_APPLICATIONS,
+    MAX_DAILY_COMMUNICATIONS,
     Artifact,
     CandidateFact,
     SearchPreferences,
@@ -16,6 +18,7 @@ from linkedin_bot.domain.models import (
 )
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
 
 STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
@@ -31,6 +34,10 @@ HELP = (
     "/start resume onboarding\n/status show mode and progress\n"
     "/opportunities show ranked matches from collected postings\n"
     "/prepare <id> draft a cover letter for review\n"
+    "/pending actions waiting for you or with unknown outcome\n"
+    "/approve <id>, /reject <id> decide one proposed action\n"
+    "/policy show or change mode and daily caps (changes need 'confirm')\n"
+    "/resolve <action> success|none <note> record what you saw for an unknown outcome\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
 )
 
@@ -41,11 +48,16 @@ def split(text: str) -> tuple[str, ...]:
 
 class Bot:
     def __init__(
-        self, database: Database, api: TelegramAPI, generator: Generator | None = None
+        self,
+        database: Database,
+        api: TelegramAPI,
+        generator: Generator | None = None,
+        executor: Executor | None = None,
     ) -> None:
         self.db = database
         self.api = api
         self.generator = generator
+        self.executor = executor or Executor(database)
         self.store = TelegramStore(database)
 
     async def handle(self, update: Update) -> None:
@@ -83,6 +95,14 @@ class Bot:
             await self._reply(chat_id, await self._opportunities())
         elif command == "/prepare":
             await self._reply(chat_id, await self._prepare(text.split()[1:]))
+        elif command == "/pending":
+            await self._reply(chat_id, await self._pending())
+        elif command in ("/approve", "/reject"):
+            await self._reply(chat_id, await self._decide(command == "/approve", text))
+        elif command == "/policy":
+            await self._reply(chat_id, await self._policy(text.split()[1:]))
+        elif command == "/resolve":
+            await self._reply(chat_id, await self._resolve(text.split(maxsplit=3)[1:]))
         elif command == "/pause":
             await self.db.pause(True)
             await self._reply(chat_id, "Paused.")
@@ -125,6 +145,93 @@ class Bot:
             return f"Draft not produced: {exc.code}. Nothing was saved."
         text = (self.db.root / artifact.relative_path).read_text()
         return f"Draft for review (not sent anywhere):\n\n{text}"
+
+    async def _pending(self) -> str:
+        lines = []
+        for item in await self.db.actions_in_state("awaiting_approval"):
+            approval = await self.db.approval_for(item.id)
+            lines.append(
+                f"Approve? {item.kind} to {item.target}\n{item.content}\n"
+                f"/approve {approval}   /reject {approval}"
+            )
+        for item in await self.db.actions_in_state("unknown"):
+            lines.append(
+                f"Unknown outcome: {item.kind} to {item.target} ({item.id})\n"
+                "Inspect it yourself, then /resolve <id> success|none <evidence note>. "
+                "It will not be retried automatically."
+            )
+        return "\n\n".join(lines) if lines else "Nothing waiting."
+
+    async def _decide(self, approve: bool, text: str) -> str:
+        parts = text.split()
+        if len(parts) != 2:
+            return f"Usage: {parts[0]} <approval id>"
+        outcome = await self.executor.decide(parts[1], approve=approve)
+        if outcome == "stale":
+            return "That approval is no longer valid (used, expired, edited or policy changed)."
+        if outcome == "rejected":
+            return "Rejected. Nothing will be sent."
+        action_id = await self.db.call(
+            lambda c: c.execute(
+                "SELECT action_id FROM approvals WHERE id=?", (parts[1],)
+            ).fetchone()[0]
+        )
+        reasons = await self.executor.run(action_id)
+        if reasons:
+            return f"Approved, but blocked: {', '.join(reasons)}. Nothing was sent."
+        _, state = await self.db.action(action_id)
+        return f"Dispatched once. Outcome: {state}."
+
+    async def _policy(self, arguments: list[str]) -> str:
+        current = await self.db.policy()
+        summary = (
+            f"mode={current.mode} applications/day={current.application_cap} "
+            f"messages/day={current.communication_cap}"
+        )
+        if not arguments:
+            return summary
+        confirmed = arguments[-1] == "confirm"
+        change = arguments[:-1] if confirmed else arguments
+        update: dict[str, object]
+        if len(change) == 2 and change[0] == "mode" and change[1] in ("draft_only", "reviewed"):
+            update = {"mode": change[1]}
+        elif (
+            len(change) == 3
+            and change[0] == "cap"
+            and change[1] in ("application", "communication")
+            and change[2].isdecimal()
+        ):
+            ceiling = (
+                MAX_DAILY_APPLICATIONS if change[1] == "application" else MAX_DAILY_COMMUNICATIONS
+            )
+            if int(change[2]) > ceiling:
+                return f"The hard ceiling for {change[1]} is {ceiling} per day."
+            update = {f"{change[1]}_cap": int(change[2])}
+        else:
+            return "Usage: /policy [mode draft_only|reviewed | cap application|communication N]"
+        proposed = current.model_copy(update={**update, "revision": current.revision + 1})
+        if not confirmed:
+            return (
+                f"Before: {summary}\nAfter: mode={proposed.mode} "
+                f"applications/day={proposed.application_cap} "
+                f"messages/day={proposed.communication_cap}\n"
+                "Pending actions will need fresh approval. Repeat the command with 'confirm'."
+            )
+        await self.db.save_policy(
+            proposed.model_copy(update={"paused": False, "restore_audit_required": False}),
+            current.revision,
+        )
+        return (
+            f"Policy updated to revision {proposed.revision}. Pending approvals were invalidated."
+        )
+
+    async def _resolve(self, arguments: list[str]) -> str:
+        if len(arguments) < 2 or arguments[1] not in ("success", "none"):
+            return "Usage: /resolve <action id> success|none <evidence note>"
+        if len(arguments) < 3 or not arguments[2].strip():
+            return "An evidence note is required: say what you inspected."
+        done = await self.db.resolve_unknown(arguments[0], arguments[1] == "success", arguments[2])
+        return "Recorded as your attestation." if done else "No unknown action with that id."
 
     async def _prompt(self) -> str:
         step, _ = await self.store.onboarding()
