@@ -13,6 +13,8 @@ from pydantic import ValidationError
 
 from linkedin_bot.adapters.ats import ATSSource, Board, Provider
 from linkedin_bot.adapters.browser_probe import browser_smoke
+from linkedin_bot.adapters.linkedin.limits import Limiter
+from linkedin_bot.adapters.linkedin.session import open_connector, open_page, wait_for_login
 from linkedin_bot.adapters.ollama import OllamaGenerator, OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
 from linkedin_bot.adapters.telegram import HttpTelegram
@@ -21,9 +23,11 @@ from linkedin_bot.runtime.config import Config, load_config
 from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
 from linkedin_bot.runtime.privacy import BoundaryError, configure_logging
 from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError
+from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.workflows.executor import Executor
+from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.telegram_bot import Bot, poll_once
 
@@ -57,6 +61,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("pair", help="Print a one-use Telegram pairing code (valid ten minutes)")
     telegram = commands.add_parser("telegram", help="Poll Telegram in the foreground")
     telegram.add_argument("--once", action="store_true", help="Handle one polling batch")
+    linkedin = commands.add_parser("linkedin", help="Read-only LinkedIn session tools")
+    linkedin.add_argument("action", choices=("login", "status"))
     probe = commands.add_parser("probe", help="Explicit bounded feasibility checks")
     probe.add_argument("target", choices=("ollama", "browser"))
     probe.add_argument("--model", help="Installed model for a synthetic probe; never downloads")
@@ -79,9 +85,25 @@ async def probe(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+async def linkedin_cli(args: argparse.Namespace, config: Config) -> int:
+    executable = config.linkedin.browser_executable
+    if args.action == "login":
+        async with open_page(config.root, headless=False, executable=executable) as page:
+            await page.goto("https://www.linkedin.com/login")
+            emit({"instruction": "Sign in in the browser window (10 minutes). Do not close it."})
+            state = await wait_for_login(page)
+        emit({"session": state})
+        return 0 if state == "ready" else 2
+    async with open_connector(config.root, Limiter(), executable) as connector:
+        emit({"session": await connector.status()})
+    return 0
+
+
 async def execute(args: argparse.Namespace, config: Config) -> int:
     if args.command == "probe":
         return await probe(args, config)
+    if args.command == "linkedin":
+        return await linkedin_cli(args, config)
     with RuntimeLock(config.root):
         if (config.root / "restore-incomplete").exists():
             raise BoundaryError("unfinished_restore_requires_recovery")
@@ -211,7 +233,12 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
     api = HttpTelegram()
     generator = OllamaGenerator(config.inference) if config.inference.model else None
     # No effect adapter is registered, so approved actions stay blocked until one is added.
-    bot = Bot(database, api, generator, Executor(database, timezone=config.timezone))
+    limiter = Limiter()  # shared, so the page budget holds across Telegram commands
+    commands = LinkedInCommands(
+        lambda: open_connector(config.root, limiter, config.linkedin.browser_executable),
+        LinkedInStore(database),
+    )
+    bot = Bot(database, api, generator, Executor(database, timezone=config.timezone), commands)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):

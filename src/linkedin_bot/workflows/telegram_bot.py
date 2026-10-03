@@ -19,6 +19,7 @@ from linkedin_bot.domain.models import (
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.workflows.executor import Executor
+from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
 
 STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
@@ -38,6 +39,7 @@ HELP = (
     "/approve <id>, /reject <id> decide one proposed action\n"
     "/policy show or change mode and daily caps (changes need 'confirm')\n"
     "/resolve <action> success|none <note> record what you saw for an unknown outcome\n"
+    "/li_status /li_messages /li_search /li_profile read-only LinkedIn access\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
 )
 
@@ -53,11 +55,13 @@ class Bot:
         api: TelegramAPI,
         generator: Generator | None = None,
         executor: Executor | None = None,
+        linkedin: LinkedInCommands | None = None,
     ) -> None:
         self.db = database
         self.api = api
         self.generator = generator
         self.executor = executor or Executor(database)
+        self.linkedin = linkedin
         self.store = TelegramStore(database)
 
     async def handle(self, update: Update) -> None:
@@ -103,6 +107,13 @@ class Bot:
             await self._reply(chat_id, await self._policy(text.split()[1:]))
         elif command == "/resolve":
             await self._reply(chat_id, await self._resolve(text.split(maxsplit=3)[1:]))
+        elif command is not None and command.startswith("/li_"):
+            await self._reply(
+                chat_id,
+                "LinkedIn is not enabled on this installation."
+                if self.linkedin is None
+                else await self.linkedin.handle(text),
+            )
         elif command == "/pause":
             await self.db.pause(True)
             await self._reply(chat_id, "Paused.")

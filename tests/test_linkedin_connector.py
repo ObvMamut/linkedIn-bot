@@ -189,3 +189,51 @@ def test_profile_directory_is_private_and_under_data_dir(tmp_path):
     directory = profile_dir(tmp_path)
     assert directory == tmp_path / "browser" and directory.is_dir()
     assert (directory.stat().st_mode & 0o777) == 0o700
+
+
+def test_wait_for_login_returns_once_the_user_has_signed_in():
+    from linkedin_bot.adapters.linkedin.session import wait_for_login
+
+    class Sequence:
+        def __init__(self):
+            self.steps = [
+                ("https://www.linkedin.com/login", LOGIN),
+                ("https://www.linkedin.com/checkpoint/challenge/1", ""),
+                ("https://www.linkedin.com/feed/", SIGNED_IN),
+            ]
+            self.url = ""
+
+        async def content(self):
+            self.url, html = self.steps.pop(0) if len(self.steps) > 1 else self.steps[0]
+            return html
+
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    page = Sequence()
+    assert run(wait_for_login(page, give_up_after=600, interval=3, sleep=sleep)) == "ready"
+    assert sleeps == [3, 3]
+
+
+def test_wait_for_login_gives_up_at_the_deadline():
+    from linkedin_bot.adapters.linkedin.session import wait_for_login
+
+    class Stuck:
+        url = "https://www.linkedin.com/login"
+
+        async def content(self):
+            return LOGIN
+
+    ticks = iter(range(0, 1000, 100))
+
+    async def sleep(_):
+        return None
+
+    result = run(
+        wait_for_login(
+            Stuck(), give_up_after=250, interval=1, sleep=sleep, clock=lambda: next(ticks)
+        )
+    )
+    assert result == "auth_required"

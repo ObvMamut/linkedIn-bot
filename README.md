@@ -66,6 +66,22 @@ review; needs `inference.model` and a running local Ollama), `/pending`, `/appro
 `/reject <id>`, `/policy` (mode and daily caps, changes need `confirm`, hard ceilings 10
 applications and 5 messages per day), `/resolve <action> success|none <note>`, `/pause`, `/resume`.
 
+## LinkedIn (read-only)
+
+```sh
+uv run linkedin-bot linkedin login    # visible window on the app's own profile; sign in once
+uv run linkedin-bot linkedin status   # headless session check
+```
+
+Then, in Telegram: `/li_status`, `/li_messages [1-10]`, `/li_search people|firms <query>`,
+`/li_profile [https://www.linkedin.com/in/<name>]`. The connector can only navigate and read;
+a test fails if the package gains any click, type or press call. It stops at the first login or
+verification page and pauses for 6 hours, never solving challenges. Limits: 30 page loads/hour,
+150/day, 4-10 s between loads. Page selectors are **unverified** against real LinkedIn pages
+until the supervised live step (`/li_status` says so). LinkedIn's terms prohibit automated
+access, so your account could be restricted; the limits reduce but do not remove that risk.
+Message text is never stored or logged.
+
 Only the paired user and private chat are answered; everyone else is silently ignored.
 Onboarding (roles, locations, exclusions, work eligibility, pasted CV) is resumable and
 stored locally. Restoring a backup clears the pairing.

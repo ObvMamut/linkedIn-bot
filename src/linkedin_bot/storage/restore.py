@@ -78,6 +78,11 @@ def restore_backup(backup: Path, root: Path) -> None:
             )
             connection.execute("UPDATE approvals SET invalidated=1 WHERE consumed_at IS NULL")
             if connection.execute(
+                "SELECT count(*) FROM sqlite_master WHERE name='linkedin_state'"
+            ).fetchone()[0]:
+                # The browser profile is not part of a backup, so the session must be re-verified.
+                connection.execute("UPDATE linkedin_state SET state='unknown',last_success=NULL")
+            if connection.execute(
                 "SELECT count(*) FROM sqlite_master WHERE name='telegram_binding'"
             ).fetchone()[0]:
                 # A restored installation must be paired again before it talks to anyone.

@@ -60,9 +60,9 @@ else is refused before any navigation. Output is truncated to Telegram limits.
 
 ## Data and privacy
 
-Results are returned to the paired chat and not persisted by default. Message text is never
-logged and never offered to an LLM. The only stored state is the session status, last success
-time and cooldown, in a small table (migration 003). Restore clears it.
+Results are returned to the paired chat and not persisted. Message text is never logged and
+never offered to an LLM. The only stored state is the session status and last success time in a
+small table (migration 003); the cooldown lives in the running process. Restore clears it.
 
 ## Error handling
 
@@ -88,3 +88,9 @@ accept, connect, follow or apply. Live verification is a separate manual step af
 
 Sending or replying, invitations, applications, scheduled inbox monitoring, feed reading,
 message storage, any LLM use of LinkedIn content.
+
+## Deviations recorded during implementation
+
+- `/li_profile` opens people pages only; company URLs validate but are refused until a company-page parser exists.
+- No `notified_state` column: replies state the problem each time. Proactive deduplicated notices belong to scheduled monitoring, which is out of scope.
+- The browser opens per command and closes afterwards, so none stays resident between requests.
