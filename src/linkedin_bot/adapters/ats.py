@@ -100,6 +100,7 @@ class ATSSource:
                     items.append(
                         SourceObservation(
                             source="greenhouse",
+                            company=self.board.slug,
                             external_id=str(job.id),
                             url=job.absolute_url,
                             title=job.title,
@@ -120,6 +121,7 @@ class ATSSource:
                     items.append(
                         SourceObservation(
                             source="lever",
+                            company=self.board.slug,
                             external_id=lever.id,
                             url=lever.hostedUrl,
                             title=lever.text,
@@ -139,6 +141,7 @@ class ATSSource:
                     items.append(
                         SourceObservation(
                             source="ashby",
+                            company=self.board.slug,
                             external_id=ashby.id,
                             url=ashby.jobUrl,
                             title=ashby.title,

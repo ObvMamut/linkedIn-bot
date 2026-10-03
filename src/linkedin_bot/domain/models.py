@@ -51,7 +51,15 @@ class CandidateProfile(Contract):
     baseline_artifact_id: str | None = None
 
 
+PriorityName = Literal["role", "location", "firm", "recency", "language"]
+DEFAULT_PRIORITIES: tuple[PriorityName, ...] = ("role", "location", "firm", "recency", "language")
+
+
 class SearchPreferences(Contract):
+    """Hard settings (plain rules, no LLM). Every new field has a default so rows saved by
+    earlier versions still load. `priorities` lists the criteria that count, most important
+    first; criteria left out add nothing to the score (hard filters still apply)."""
+
     revision: int = Field(default=1, ge=1)
     roles: tuple[str, ...] = ()
     sectors: tuple[str, ...] = ()
@@ -59,6 +67,16 @@ class SearchPreferences(Contract):
     remote: bool | None = None
     internship: bool | None = None
     exclusions: tuple[str, ...] = ()
+    must_keywords: tuple[str, ...] = ()
+    nice_keywords: tuple[str, ...] = ()
+    seniority: tuple[str, ...] = ()
+    job_types: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    max_age_days: int | None = Field(default=None, ge=1, le=365)
+    blocked_firms: tuple[str, ...] = ()
+    preferred_industries: tuple[str, ...] = ()
+    priorities: tuple[PriorityName, ...] = DEFAULT_PRIORITIES
+    interests: str = Field(default="", max_length=2000)
 
 
 ActionKind = Literal[
@@ -124,8 +142,9 @@ class ActionResult(Contract):
 
 
 class SourceObservation(Contract):
-    source: Literal["greenhouse", "lever", "ashby"]
+    source: Literal["greenhouse", "lever", "ashby", "linkedin"]
     external_id: str
+    company: str | None = None
     url: str
     title: str
     location: str | None = None
