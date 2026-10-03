@@ -104,7 +104,7 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                 emit({"paused": False, "mode": "draft_only"})
             elif args.command in ("collect", "schedule-board"):
                 board = Board(provider=cast(Provider, args.provider), slug=args.slug)
-                board.endpoint(20, None)
+                board.endpoint(getattr(args, "limit", 20), None)
                 workflow = f"ats:{board.provider}:{board.slug}"
                 if args.command == "collect":
                     workflow = f"adhoc:{board.provider}:{board.slug}:{identifier()}"

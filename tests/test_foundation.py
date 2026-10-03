@@ -632,3 +632,25 @@ def test_restore_ready_actions_require_audit(tmp_path):
             await restored.close()
 
     asyncio.run(scenario())
+
+
+def test_collect_rejects_invalid_limit_before_scheduling_work(tmp_path):
+    def invoke(*args):
+        return subprocess.run(
+            [sys.executable, "-m", "linkedin_bot.runtime.cli", "--data-dir", str(tmp_path / "data"), *args],
+            text=True,
+            capture_output=True,
+        )
+
+    assert invoke("init").returncode == 0
+    assert invoke("collect", "greenhouse", "acme", "--limit", "0").returncode != 0
+
+    async def count():
+        db = Database(tmp_path / "data")
+        try:
+            await db.open()
+            return await db.call(lambda c: c.execute("SELECT COUNT(*) FROM work_items").fetchone()[0])
+        finally:
+            await db.close()
+
+    assert asyncio.run(count()) == 0
