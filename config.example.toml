@@ -1,0 +1,17 @@
+schema_version = 1
+timezone = "Europe/Warsaw"
+data_dir = "~/.local/share/linkedin-bot"
+
+[telegram]
+transport = "long_polling"
+
+[linkedin]
+jobs_interval_minutes = 360
+inbox_interval_minutes = 30
+requests_interval_minutes = 30
+posts_interval_minutes = 360
+
+[inference]
+local_endpoint = "http://127.0.0.1:11434"
+max_concurrency = 1
+task_deadline_seconds = 300

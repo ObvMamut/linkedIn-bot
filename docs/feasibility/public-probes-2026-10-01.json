@@ -1,0 +1,50 @@
+{
+  "observed_at": "2026-10-01T09:44:08.142466+00:00",
+  "adapter_version": "0.1.0",
+  "scope": "bounded public GETs only",
+  "greenhouse:astranis": {
+    "board": {
+      "provider": "greenhouse",
+      "slug": "astranis"
+    },
+    "company_page": "https://www.astranis.com/careers",
+    "status": "failed",
+    "reason": "response_too_large",
+    "company_page_bytes": 130258,
+    "board_domain_mentioned": true,
+    "qualification": "domain mention is a lead; exact official board link verification remains M3"
+  },
+  "lever:welocalize": {
+    "board": {
+      "provider": "lever",
+      "slug": "welocalize"
+    },
+    "company_page": "https://www.welocalize.com/careers/",
+    "status": "failed",
+    "reason": "http_status",
+    "company_page_reason": "http_status"
+  },
+  "ashby:Linear": {
+    "board": {
+      "provider": "ashby",
+      "slug": "Linear"
+    },
+    "company_page": "https://linear.app/careers",
+    "status": "passed",
+    "count": 20,
+    "coverage": "partial",
+    "next_cursor": null,
+    "latency_seconds": 0.257,
+    "sample_public_urls": [
+      "https://jobs.ashbyhq.com/Linear/d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "https://jobs.ashbyhq.com/Linear/cd5ae036-0223-427a-b038-ba16ef9dcb32"
+    ],
+    "company_page_bytes": 467795,
+    "board_domain_mentioned": true,
+    "qualification": "domain mention is a lead; exact official board link verification remains M3"
+  },
+  "search": {
+    "status": "failed",
+    "reason": "http_status"
+  }
+}

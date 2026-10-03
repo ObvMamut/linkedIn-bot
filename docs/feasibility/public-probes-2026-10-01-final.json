@@ -1,0 +1,79 @@
+{
+  "observed_at": "2026-10-01T09:46:26.650785+00:00",
+  "adapter_version": "0.1.0",
+  "scope": "bounded public GETs only",
+  "greenhouse:astranis": {
+    "board": {
+      "provider": "greenhouse",
+      "slug": "astranis"
+    },
+    "company_page": "https://www.astranis.com/careers",
+    "status": "passed",
+    "count": 20,
+    "coverage": "partial",
+    "next_cursor": null,
+    "latency_seconds": 0.264,
+    "sample_public_urls": [
+      "https://job-boards.greenhouse.io/astranis/jobs/4430423006",
+      "https://job-boards.greenhouse.io/astranis/jobs/4704301006"
+    ],
+    "form_metadata": {
+      "status": "passed_metadata_only",
+      "job_id": 4430423006,
+      "question_count": 12,
+      "field_types": [
+        "input_file",
+        "input_text",
+        "multi_value_multi_select",
+        "multi_value_single_select",
+        "textarea"
+      ],
+      "qualification": "metadata only; browser form layouts remain pending"
+    },
+    "company_page_bytes": 130258,
+    "board_domain_mentioned": true,
+    "qualification": "domain mention is a lead; exact board link verification remains M3"
+  },
+  "lever:verygoodsecurity": {
+    "board": {
+      "provider": "lever",
+      "slug": "verygoodsecurity"
+    },
+    "company_page": "https://www.verygoodsecurity.com/careers",
+    "status": "passed",
+    "count": 19,
+    "coverage": "complete",
+    "next_cursor": null,
+    "latency_seconds": 2.67,
+    "sample_public_urls": [
+      "https://jobs.lever.co/verygoodsecurity/132e38a9-5e57-4f47-b5cc-f471b17c7930",
+      "https://jobs.lever.co/verygoodsecurity/6778619f-29ac-40b8-bbda-0c42b2ea5264"
+    ],
+    "company_page_bytes": 130283,
+    "board_domain_mentioned": false,
+    "qualification": "domain mention is a lead; exact board link verification remains M3"
+  },
+  "ashby:Linear": {
+    "board": {
+      "provider": "ashby",
+      "slug": "Linear"
+    },
+    "company_page": "https://linear.app/careers",
+    "status": "passed",
+    "count": 20,
+    "coverage": "partial",
+    "next_cursor": null,
+    "latency_seconds": 0.118,
+    "sample_public_urls": [
+      "https://jobs.ashbyhq.com/Linear/d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "https://jobs.ashbyhq.com/Linear/cd5ae036-0223-427a-b038-ba16ef9dcb32"
+    ],
+    "company_page_bytes": 467796,
+    "board_domain_mentioned": true,
+    "qualification": "domain mention is a lead; exact board link verification remains M3"
+  },
+  "search": {
+    "status": "failed",
+    "reason": "http_status"
+  }
+}

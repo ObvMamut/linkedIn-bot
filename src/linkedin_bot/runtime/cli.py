@@ -1,0 +1,221 @@
+import argparse
+import asyncio
+import json
+import logging
+import os
+import signal
+import sqlite3
+import sys
+from pathlib import Path
+from typing import cast
+
+from pydantic import ValidationError
+
+from linkedin_bot.adapters.ats import ATSSource, Board, Provider
+from linkedin_bot.adapters.browser_probe import browser_smoke
+from linkedin_bot.adapters.ollama import OllamaProbe
+from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
+from linkedin_bot.domain.models import identifier, now
+from linkedin_bot.runtime.config import Config, load_config
+from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
+from linkedin_bot.runtime.privacy import BoundaryError, configure_logging
+from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError
+from linkedin_bot.storage.restore import restore_backup
+from linkedin_bot.workflows.monitor import run_one
+
+
+def emit(content: object) -> None:
+    print(json.dumps(content, indent=2, default=str))
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description="Draft-only local job-search foundations")
+    result.add_argument("--config", type=Path)
+    result.add_argument("--data-dir", type=Path)
+    commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("init", help="Initialize private local storage without network access")
+    commands.add_parser("doctor", help="Report local persistence and unreleased capabilities")
+    commands.add_parser("backup", help="Create a private consistent local snapshot")
+    restore = commands.add_parser("restore", help="Restore into a fresh data directory, paused")
+    restore.add_argument("snapshot", type=Path)
+    commands.add_parser("pause")
+    commands.add_parser("resume", help="Resume reads; draft-only restrictions remain")
+    for name in ("collect", "schedule-board"):
+        command = commands.add_parser(name)
+        command.add_argument("provider", choices=("greenhouse", "lever", "ashby"))
+        command.add_argument("slug")
+        if name == "collect":
+            command.add_argument("--limit", type=int, default=20)
+        else:
+            command.add_argument("--interval-seconds", type=int, default=21600)
+    run = commands.add_parser("run", help="Run explicitly configured read work in the foreground")
+    run.add_argument("--once", action="store_true", help="Process at most one due work item")
+    probe = commands.add_parser("probe", help="Explicit bounded feasibility checks")
+    probe.add_argument("target", choices=("ollama", "browser"))
+    probe.add_argument("--model", help="Installed model for a synthetic probe; never downloads")
+    probe.add_argument("--browser-executable", help="Use installed Chromium for a smoke check")
+    return result
+
+
+async def probe(args: argparse.Namespace, config: Config) -> int:
+    if args.target == "browser":
+        emit(await browser_smoke(args.browser_executable))
+    else:
+        adapter = OllamaProbe(config.inference)
+        try:
+            if args.model:
+                emit(await adapter.synthetic(args.model))
+            else:
+                emit({"models": [model.model_dump() for model in await adapter.inventory()]})
+        finally:
+            await adapter.close()
+    return 0
+
+
+async def execute(args: argparse.Namespace, config: Config) -> int:
+    if args.command == "probe":
+        return await probe(args, config)
+    with RuntimeLock(config.root):
+        if (config.root / "restore-incomplete").exists():
+            raise BoundaryError("unfinished_restore_requires_recovery")
+        if args.command == "restore":
+            await asyncio.to_thread(restore_backup, args.snapshot.absolute(), config.root)
+        database = Database(config.root)
+        try:
+            await database.open()
+            recovery = await database.recover()
+            artifact_health = await database.inspect_artifacts()
+            if any(artifact_health.values()):
+                logging.warning(
+                    "",
+                    extra={
+                        "event": "artifact_recovery_needed",
+                        "count": sum(artifact_health.values()),
+                    },
+                )
+            logging.info("", extra={"event": "runtime_ready"})
+            if args.command == "backup":
+                emit({"snapshot": str(await database.backup())})
+            elif args.command == "pause":
+                await database.pause(True)
+                emit({"paused": True})
+            elif args.command == "resume":
+                await database.pause(False)
+                emit({"paused": False, "mode": "draft_only"})
+            elif args.command in ("collect", "schedule-board"):
+                board = Board(provider=cast(Provider, args.provider), slug=args.slug)
+                board.endpoint(20, None)
+                workflow = f"ats:{board.provider}:{board.slug}"
+                if args.command == "collect":
+                    workflow = f"adhoc:{board.provider}:{board.slug}:{identifier()}"
+                await database.schedule(
+                    workflow,
+                    board.model_dump_json(),
+                    now(),
+                    getattr(args, "interval_seconds", 21600),
+                    recurring=args.command == "schedule-board",
+                )
+                if args.command == "collect":
+                    http = PublicHTTP()
+                    try:
+                        work = await database.claim(now(), workflow)
+                        if work is None:
+                            raise BoundaryError("runtime_paused")
+                        if work.workflow != workflow:
+                            raise BoundaryError("another_work_item_due_use_run")
+                        try:
+                            page = await ATSSource(http, board).collect(args.limit, work.checkpoint)
+                            await database.persist_page(work, page, now())
+                        except AdapterError as exc:
+                            await database.fail_work(work, exc.code, exc.transient, now())
+                            raise
+                        emit(
+                            {
+                                "count": len(page.items),
+                                "coverage": page.coverage,
+                                "next_cursor": page.next_cursor,
+                                "qualification": "board observation; domain verification pending",
+                            }
+                        )
+                    finally:
+                        await http.close()
+                else:
+                    emit({"scheduled": board.model_dump(), "execution": "foreground run required"})
+            elif args.command == "run":
+                await foreground(database, once=args.once)
+                emit({"stopped": True})
+            else:
+                emit(
+                    {
+                        **await database.status(),
+                        "policy": (await database.policy()).model_dump(),
+                        "recovery": recovery,
+                        **artifact_health,
+                        "capabilities": {
+                            "linkedin": "pending_login_and_read_gates",
+                            "telegram": "pending_token_pairing_M2",
+                            "inference": "not_evaluated",
+                            "employer_effects": "disabled",
+                            "deepseek": "disabled",
+                        },
+                    }
+                )
+        finally:
+            await database.close()
+            logging.info("", extra={"event": "runtime_stopped"})
+    return 0
+
+
+async def foreground(database: Database, *, once: bool) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+    http = PublicHTTP()
+    try:
+        while not stop.is_set():
+            if once:
+                await run_one(database, http)
+                break
+            if not await run_one(database, http):
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=1)
+                except TimeoutError:
+                    pass
+    finally:
+        await http.close()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(signum)
+
+
+def main() -> int:
+    os.umask(0o077)
+    configure_logging()
+    args = parser().parse_args()
+    try:
+        config = load_config(args.config)
+        if args.data_dir is not None:
+            config = Config.model_validate({**config.model_dump(), "data_dir": str(args.data_dir)})
+            config.validate_paths()
+        return asyncio.run(execute(args, config))
+    except ValidationError as exc:
+        emit(
+            {
+                "error": "validation_error",
+                "fields": [
+                    {"location": list(error["loc"]), "type": error["type"]}
+                    for error in exc.errors(include_input=False, include_context=False)
+                ],
+            }
+        )
+        return 2
+    except (AdapterError, AlreadyRunning, BoundaryError, SchemaError, RevisionConflict) as exc:
+        emit({"error": str(exc)})
+        return 2
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        emit({"error": type(exc).__name__})
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

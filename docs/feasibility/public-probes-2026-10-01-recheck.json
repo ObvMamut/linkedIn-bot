@@ -1,0 +1,76 @@
+{
+  "observed_at": "2026-10-01T09:45:22.995177+00:00",
+  "adapter_version": "0.1.0",
+  "scope": "bounded public GETs only",
+  "greenhouse:astranis": {
+    "board": {
+      "provider": "greenhouse",
+      "slug": "astranis"
+    },
+    "company_page": "https://www.astranis.com/careers",
+    "status": "passed",
+    "count": 20,
+    "coverage": "partial",
+    "next_cursor": null,
+    "latency_seconds": 5.252,
+    "sample_public_urls": [
+      "https://job-boards.greenhouse.io/astranis/jobs/4430423006",
+      "https://job-boards.greenhouse.io/astranis/jobs/4704301006"
+    ],
+    "form_metadata": {
+      "status": "passed_metadata_only",
+      "job_id": 4430423006,
+      "question_count": 12,
+      "field_types": [
+        "input_file",
+        "input_text",
+        "multi_value_multi_select",
+        "multi_value_single_select",
+        "textarea"
+      ],
+      "qualification": "metadata only; browser form layouts remain pending"
+    },
+    "company_page_bytes": 130258,
+    "board_domain_mentioned": true,
+    "qualification": "domain mention is a lead; exact board link verification remains M3"
+  },
+  "lever:mistral": {
+    "board": {
+      "provider": "lever",
+      "slug": "mistral"
+    },
+    "company_page": "https://mistral.ai/careers",
+    "status": "passed",
+    "count": 0,
+    "coverage": "complete",
+    "next_cursor": null,
+    "latency_seconds": 0.875,
+    "sample_public_urls": [],
+    "company_page_bytes": 344095,
+    "board_domain_mentioned": false,
+    "qualification": "domain mention is a lead; exact board link verification remains M3"
+  },
+  "ashby:Linear": {
+    "board": {
+      "provider": "ashby",
+      "slug": "Linear"
+    },
+    "company_page": "https://linear.app/careers",
+    "status": "passed",
+    "count": 20,
+    "coverage": "partial",
+    "next_cursor": null,
+    "latency_seconds": 0.091,
+    "sample_public_urls": [
+      "https://jobs.ashbyhq.com/Linear/d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "https://jobs.ashbyhq.com/Linear/cd5ae036-0223-427a-b038-ba16ef9dcb32"
+    ],
+    "company_page_bytes": 467795,
+    "board_domain_mentioned": true,
+    "qualification": "domain mention is a lead; exact board link verification remains M3"
+  },
+  "search": {
+    "status": "failed",
+    "reason": "http_status"
+  }
+}

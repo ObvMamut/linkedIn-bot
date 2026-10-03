@@ -1,0 +1,31 @@
+[project]
+name = "linkedin-bot"
+version = "0.1.0"
+description = "Local, draft-only personal job-search agent foundations"
+requires-python = ">=3.14,<3.15"
+dependencies = ["pydantic>=2.12,<3", "httpx>=0.28,<0.29", "playwright>=1.58,<2"]
+
+[project.scripts]
+linkedin-bot = "linkedin_bot.runtime.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10,<0.11"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.15,<1", "mypy>=1.19,<2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src"]

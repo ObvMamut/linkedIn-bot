@@ -1,0 +1,215 @@
+{
+  "accelerators": {
+    "candidate_counts": {
+      "cuda": 0,
+      "metal": 0,
+      "rocm": 0
+    },
+    "candidate_upper_bounds": {
+      "cuda": null,
+      "metal": null,
+      "rocm": null
+    },
+    "devices": [],
+    "runtime_usable_devices": null,
+    "visibility_environment": {
+      "CUDA_VISIBLE_DEVICES": {
+        "entry_count": null,
+        "set": false,
+        "state": "unset",
+        "value_redacted": true
+      },
+      "HIP_VISIBLE_DEVICES": {
+        "entry_count": null,
+        "set": false,
+        "state": "unset",
+        "value_redacted": true
+      },
+      "NVIDIA_VISIBLE_DEVICES": {
+        "entry_count": null,
+        "set": false,
+        "state": "unset",
+        "value_redacted": true
+      },
+      "ROCR_VISIBLE_DEVICES": {
+        "entry_count": null,
+        "set": false,
+        "state": "unset",
+        "value_redacted": true
+      }
+    }
+  },
+  "cgroup_v2": {
+    "detected": true,
+    "scope": "non_root"
+  },
+  "completeness": "complete_with_informational_notes",
+  "container": {
+    "detected": false,
+    "evidence": [],
+    "runtime": null
+  },
+  "cpu": {
+    "cgroup_v2": {
+      "cpuset_logical": null,
+      "quota_cores": null
+    },
+    "effective": {
+      "capacity_cores": 20.0,
+      "limiting_sources": [
+        "host_logical",
+        "process_affinity",
+        "python_process_count"
+      ],
+      "worker_ceiling": 20
+    },
+    "host": {
+      "logical": 20,
+      "physical": 14
+    },
+    "process": {
+      "affinity_logical": 20,
+      "python_available_logical": 20
+    }
+  },
+  "disk": {
+    "capacity_bytes": 419021791232,
+    "free_bytes": 77500616704,
+    "scope": "working_filesystem_path_redacted",
+    "user_available_bytes": 77500616704,
+    "writability_check": "os_access_only_no_write_probe",
+    "writable": true
+  },
+  "memory": {
+    "cgroup_v2": {
+      "available_bytes": null,
+      "current_bytes": null,
+      "high_bytes": null,
+      "max_bytes": null
+    },
+    "effective": {
+      "available_bytes": 27620712448,
+      "available_limiting_sources": [
+        "host_available"
+      ],
+      "hard_limit_bytes": 33312342016,
+      "hard_limit_sources": [
+        "host_total"
+      ],
+      "pressure_threshold_bytes": null
+    },
+    "host": {
+      "available_bytes": 27620712448,
+      "total_bytes": 33312342016
+    },
+    "model": "system_ram",
+    "swap": {
+      "free_bytes": 0,
+      "total_bytes": 0
+    }
+  },
+  "observed_at": "2026-10-01T09:46:27Z",
+  "platform": {
+    "machine": "x86_64",
+    "python_version": "3.14.7",
+    "system": "Linux"
+  },
+  "privacy": {
+    "absolute_paths_included": false,
+    "environment_values_included": false,
+    "hostnames_included": false,
+    "identifiers_redacted_by_default": true
+  },
+  "provenance": [
+    {
+      "component": "accelerators.amd",
+      "source": "rocm-smi",
+      "status": "not_found"
+    },
+    {
+      "component": "accelerators.nvidia",
+      "source": "nvidia-smi",
+      "status": "error"
+    },
+    {
+      "component": "cgroup_v2",
+      "source": "procfs_and_cgroupfs",
+      "status": "ok"
+    },
+    {
+      "component": "cpu.host.logical",
+      "source": "os.cpu_count",
+      "status": "ok"
+    },
+    {
+      "component": "cpu.host.physical",
+      "source": "psutil.cpu_count",
+      "status": "ok"
+    },
+    {
+      "component": "cpu.process.affinity_logical",
+      "source": "os.sched_getaffinity",
+      "status": "ok"
+    },
+    {
+      "component": "cpu.process.python_available_logical",
+      "source": "os.process_cpu_count",
+      "status": "ok"
+    },
+    {
+      "component": "disk",
+      "source": "shutil.disk_usage",
+      "status": "ok"
+    },
+    {
+      "component": "disk.user_available",
+      "source": "os.statvfs",
+      "status": "ok"
+    },
+    {
+      "component": "inventory.psutil",
+      "source": "optional_import",
+      "status": "ok"
+    },
+    {
+      "component": "memory.host",
+      "source": "psutil.virtual_memory",
+      "status": "ok"
+    },
+    {
+      "component": "memory.swap",
+      "source": "psutil.swap_memory",
+      "status": "ok"
+    },
+    {
+      "component": "scheduler",
+      "source": "named_slurm_environment",
+      "status": "absent"
+    }
+  ],
+  "scheduler": {
+    "allocation": {
+      "cpu_per_process": null,
+      "cpus_on_node": null,
+      "gpus_on_node": null,
+      "gpus_per_process": null,
+      "memory_effective_bytes": null,
+      "memory_scope": null,
+      "tasks": null
+    },
+    "detected": false,
+    "enforcement": "not_applicable",
+    "fields_read": [],
+    "kind": null
+  },
+  "schema_version": "1.1",
+  "snapshot_kind": "effective_resource_snapshot",
+  "warnings": [
+    {
+      "code": "NVIDIA_QUERY_FAILED",
+      "component": "accelerators.nvidia",
+      "message": "nvidia-smi read-only query did not complete successfully (error).",
+      "severity": "info"
+    }
+  ]
+}
