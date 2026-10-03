@@ -1,9 +1,10 @@
 """Authorize every update, then run commands and the resumable onboarding journey."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from linkedin_bot.adapters.telegram import TelegramAPI, TelegramPoller, Update
+from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
     Artifact,
     CandidateFact,
@@ -26,6 +27,7 @@ PROMPTS = {
 MODE_LINE = "Mode: draft_only. Nothing is sent to employers; application and message caps are 0."
 HELP = (
     "/start resume onboarding\n/status show mode and progress\n"
+    "/opportunities show ranked matches from collected postings\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
 )
 
@@ -71,6 +73,8 @@ class Bot:
                 f"{MODE_LINE}\nPaused: {status['paused']}\nOnboarding: {step}\n"
                 f"Facts: {status['facts']}  Opportunities seen: {status['observations']}",
             )
+        elif command == "/opportunities":
+            await self._reply(chat_id, await self._opportunities())
         elif command == "/pause":
             await self.db.pause(True)
             await self._reply(chat_id, "Paused.")
@@ -83,6 +87,19 @@ class Bot:
             await self._reply(chat_id, f"Unknown or not yet released command.\n{HELP}")
         else:
             await self._answer(chat_id, text)
+
+    async def _opportunities(self) -> str:
+        recent = await self.db.opportunities(since=now() - timedelta(days=14))
+        matches = rank(recent, await self.db.preferences())[:5]
+        if not matches:
+            return "No matches yet. Collect boards and finish onboarding first."
+        return "\n\n".join(
+            f"{m.title} ({m.location or 'location unknown'}) score {m.score}\n"
+            f"Why: {', '.join(m.reasons)}"
+            + (f"\nGaps: {', '.join(m.gaps)}" if m.gaps else "")
+            + f"\n{m.url}"
+            for m in matches
+        )
 
     async def _prompt(self) -> str:
         step, _ = await self.store.onboarding()

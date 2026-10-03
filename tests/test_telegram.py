@@ -197,3 +197,36 @@ def test_http_telegram_requires_token_from_environment(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     with pytest.raises(BoundaryError, match="telegram_token_missing"):
         HttpTelegram()
+
+
+def test_opportunities_command_lists_ranked_matches_with_reasons(tmp_path):
+    from linkedin_bot.domain.models import (
+        CollectionPage,
+        SearchPreferences,
+        SourceObservation,
+        digest,
+    )
+
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await bot.handle(update(2, "/opportunities"))
+        assert "No matches yet" in api.sent[-1][1]
+        await db.save_preferences(SearchPreferences(revision=2, roles=("data scientist",)), 1)
+        await db.schedule("w", "{}", now(), 3600)
+        work = await db.claim(now(), "w")
+        item = SourceObservation(
+            source="lever",
+            external_id="x1",
+            url="https://jobs.lever.co/acme/x1",
+            title="Data Scientist",
+            location="Berlin",
+            content_hash=digest(b"x1"),
+        )
+        await db.persist_page(work, CollectionPage(items=(item,), coverage="complete"), now())
+        await bot.handle(update(3, "/opportunities"))
+        reply = api.sent[-1][1]
+        assert "Data Scientist" in reply and "https://jobs.lever.co/acme/x1" in reply
+        assert "role matches" in reply
+
+    run(tmp_path, scenario)

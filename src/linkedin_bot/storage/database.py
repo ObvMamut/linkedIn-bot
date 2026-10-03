@@ -21,6 +21,7 @@ from linkedin_bot.domain.models import (
     CollectionPage,
     Policy,
     SearchPreferences,
+    SourceObservation,
     WorkItem,
     digest,
     identifier,
@@ -218,6 +219,14 @@ class Database:
             return tuple(f for f in facts if f.status == "confirmed") if confirmed_only else facts
 
         return await self.call(read)
+
+    async def preferences(self) -> SearchPreferences:
+        row = await self.call(
+            lambda c: c.execute(
+                "SELECT snapshot FROM preferences ORDER BY revision DESC LIMIT 1"
+            ).fetchone()
+        )
+        return SearchPreferences.model_validate_json(row[0])
 
     async def save_preferences(
         self, preferences: SearchPreferences, expected_revision: int
@@ -501,6 +510,24 @@ class Database:
                 )
 
         await self.call(write)
+
+    async def opportunities(self, since: datetime | None) -> tuple[SourceObservation, ...]:
+        """Latest version of each posting; `since` drops postings not seen recently."""
+
+        def read(connection: sqlite3.Connection) -> tuple[SourceObservation, ...]:
+            rows = connection.execute(
+                "SELECT snapshot,last_seen FROM observations o WHERE last_seen=("
+                "SELECT MAX(last_seen) FROM observations "
+                "WHERE source=o.source AND external_id=o.external_id) "
+                "GROUP BY source,external_id ORDER BY source,external_id"
+            )
+            return tuple(
+                SourceObservation.model_validate_json(snapshot)
+                for snapshot, last_seen in rows
+                if since is None or datetime.fromisoformat(last_seen) >= since
+            )
+
+        return await self.call(read)
 
     async def status(self) -> dict[str, object]:
         def read(connection: sqlite3.Connection) -> dict[str, object]:
