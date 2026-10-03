@@ -8,6 +8,7 @@ from typing import Protocol, TypeVar
 from linkedin_bot.adapters.linkedin.models import (
     Company,
     Conversation,
+    Job,
     LinkedInError,
     Person,
     Profile,
@@ -33,6 +34,9 @@ class Connector(Protocol):
     async def messages(self, count: int, *, refresh: bool = False) -> Parsed[Conversation]: ...
     async def search_people(self, query: str, *, refresh: bool = False) -> Parsed[Person]: ...
     async def search_companies(self, query: str, *, refresh: bool = False) -> Parsed[Company]: ...
+    async def search_jobs(
+        self, query: str, location: str | None = None, *, refresh: bool = False
+    ) -> Parsed[Job]: ...
     async def profile(self, target: str | None, *, refresh: bool = False) -> Profile: ...
 
 

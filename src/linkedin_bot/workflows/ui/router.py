@@ -10,7 +10,13 @@ from linkedin_bot.adapters.ats import Board
 from linkedin_bot.adapters.linkedin.pages import Parsed
 from linkedin_bot.adapters.telegram import TelegramAPI
 from linkedin_bot.domain.matching import rank
-from linkedin_bot.domain.models import DEFAULT_PRIORITIES, SearchPreferences, now
+from linkedin_bot.domain.models import (
+    DEFAULT_PRIORITIES,
+    SearchPreferences,
+    SourceObservation,
+    digest,
+    now,
+)
 from linkedin_bot.domain.workspace import Pin
 from linkedin_bot.runtime.privacy import BoundaryError
 from linkedin_bot.storage.database import Database
@@ -23,7 +29,8 @@ from linkedin_bot.workflows.ui.screens import LIST_FIELDS, LOADING, pin_key
 from linkedin_bot.workflows.ui.tokens import TokenMap
 
 BoardFinder = Callable[[str], Awaitable[tuple[str, str] | None]]
-SEARCH_KINDS = ("people", "firms")
+SEARCH_KINDS = ("people", "firms")  # kinds whose results can be pinned
+ALL_KINDS = ("people", "firms", "jobs")
 EXPIRED = "This button expired. Open it again from the menu."
 FIELD_AREA = {
     "locations": "loc",
@@ -43,6 +50,14 @@ class Ctx:
     message_id: int | None
     callback_id: str | None = None
     answered: bool = False
+
+
+def split_job_query(text: str) -> tuple[str, str | None]:
+    """'security intern in Berlin' -> ('security intern', 'Berlin')."""
+    words, separator, place = text.rpartition(" in ")
+    if separator and words.strip() and place.strip():
+        return words.strip(), place.strip()
+    return text.strip(), None
 
 
 def split_items(text: str) -> list[str]:
@@ -148,7 +163,7 @@ class UI:
             await self.messages(ctx, refresh=data.endswith(":r"))
         elif data == "m:search":
             await self.show(ctx, screens.search_menu())
-        elif data in ("s:people", "s:firms"):
+        elif data in ("s:people", "s:firms", "s:jobs"):
             await self.store.set_awaiting(f"search:{rest}", {"msg": ctx.message_id})
             await self.show(ctx, screens.search_prompt(rest))
         elif data == "m:pins":
@@ -268,7 +283,7 @@ class UI:
             token,
             pinnable=payload["kind"] in SEARCH_KINDS,
             saved_id=payload["saved_id"],
-            can_save=payload["kind"] in SEARCH_KINDS,
+            can_save=payload["kind"] in ALL_KINDS,
         )
 
     async def page(self, ctx: Ctx, rest: str) -> str | None:
@@ -305,6 +320,14 @@ class UI:
     async def search(
         self, ctx: Ctx, kind: str, query: str, *, refresh: bool = False
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        if kind == "jobs":
+            words, place = split_job_query(query)
+            result, error = await self.fetch(
+                ctx, lambda c: c.search_jobs(words, place, refresh=refresh)
+            )
+            if error is not None:
+                return None, error
+            return await self.job_cards(result), None
         if kind == "people":
             result, error = await self.fetch(ctx, lambda c: c.search_people(query, refresh=refresh))
         else:
@@ -314,6 +337,53 @@ class UI:
         if error is not None:
             return None, error
         return self.cards(kind, result), None
+
+    async def job_cards(self, parsed: Parsed[Any]) -> list[dict[str, Any]]:
+        """Store the public postings, then order them by your settings (best fit first)."""
+        stamp = now()
+        observations = [
+            SourceObservation(
+                source="linkedin",
+                external_id=job.id,
+                url=job.url,
+                title=job.title,
+                location=job.location,
+                company=job.company,
+                content_hash=digest(f"{job.id}|{job.title}|{job.company}|{job.location}".encode()),
+                observed_at=stamp,
+            )
+            for job in parsed.items
+        ]
+        await self.db.save_observations(observations)
+        matches = rank(observations, await self.preferences(), await self.store.pinned_tokens())
+        matched = {m.external_id for m in matches}
+        cards = [
+            {
+                "title": f"💼 {m.title}",
+                "lines": [
+                    f"{m.company} · {m.location or 'location unknown'}",
+                    f"score {m.score} — {', '.join(m.reasons)}",
+                    f"Gaps: {', '.join(m.gaps)}" if m.gaps else "",
+                ],
+                "url": m.url,
+                "key": m.url,
+            }
+            for m in matches
+        ]
+        cards += [
+            {
+                "title": f"💼 {o.title}",
+                "lines": [
+                    f"{o.company} · {o.location or 'location unknown'}",
+                    "outside your settings",
+                ],
+                "url": o.url,
+                "key": o.url,
+            }
+            for o in observations
+            if o.external_id not in matched
+        ]
+        return cards
 
     async def run_search(self, ctx: Ctx, kind: str, query: str) -> None:
         items, error = await self.search(ctx, kind, query)
@@ -551,7 +621,7 @@ class UI:
     # ---- pending text input -------------------------------------------------------------
     async def consume(self, ctx: Ctx, name: str, text: str) -> None:
         kind, _, arg = name.partition(":")
-        if kind == "search" and arg in SEARCH_KINDS:
+        if kind == "search" and arg in ALL_KINDS:
             if not 1 <= len(text) <= 100:
                 await self.show(
                     ctx,

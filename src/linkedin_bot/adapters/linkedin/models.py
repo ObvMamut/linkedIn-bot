@@ -39,6 +39,14 @@ class Company(Contract):
     tagline: str = ""
 
 
+class Job(Contract):
+    id: str
+    url: str
+    title: str
+    company: str
+    location: str | None = None
+
+
 class Profile(Contract):
     url: str
     name: str

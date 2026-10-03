@@ -84,16 +84,17 @@ def search_menu() -> Screen:
         "What do you want to search for?",
         [
             [Button("👤 People", "s:people"), Button("🏢 Firms", "s:firms")],
-            [HOME],
+            [Button("💼 Jobs", "s:jobs"), HOME],
         ],
     )
 
 
 def search_prompt(kind: str) -> Screen:
-    label = {"people": "people", "firms": "firms"}.get(kind, kind)
-    return Screen(
-        f"Send the search words for {label} (for example: security engineer Berlin).", [[CANCEL]]
-    )
+    if kind == "jobs":
+        text = "Send the job search words, optionally followed by “in <place>” (for example: security intern in Berlin)."
+    else:
+        text = f"Send the search words for {kind} (for example: security engineer Berlin)."
+    return Screen(text, [[CANCEL]])
 
 
 def card(

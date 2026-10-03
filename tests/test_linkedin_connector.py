@@ -312,3 +312,30 @@ def test_status_waits_only_for_the_app_shell_not_a_settle_loop():
     conn, page, _ = connector({})
     assert run(conn.status()) == "ready"
     assert page.waited == ["main"]
+
+
+JOBS_PAGES = {
+    "https://www.linkedin.com/jobs/search": (
+        "https://www.linkedin.com/jobs/search/",
+        __import__("tests.test_linkedin_pages", fromlist=["JOBS"]).JOBS,
+    )
+}
+
+
+def test_job_search_builds_an_encoded_url_validates_input_waits_and_caches():
+    conn, page, _ = connector(JOBS_PAGES)
+    first = run(conn.search_jobs("security intern", "Berlin"))
+    assert [j.id for j in first.items] == ["4012345678", "4099"]
+    assert (
+        page.visited[-1]
+        == "https://www.linkedin.com/jobs/search/?keywords=security%20intern&location=Berlin"
+    )
+    assert page.waited[-1] == 'main a[href*="/jobs/view/"]'
+    run(conn.search_jobs("Security Intern", "berlin"))  # same search, different case
+    assert len(page.visited) == 1
+    run(conn.search_jobs("security intern", None))
+    assert page.visited[-1].endswith("?keywords=security%20intern") and len(page.visited) == 2
+    for query, location in (("", None), ("x" * 101, None), ("ok", "y" * 61)):
+        with pytest.raises(LinkedInError) as caught:
+            run(conn.search_jobs(query, location))
+        assert caught.value.code == "invalid_query"

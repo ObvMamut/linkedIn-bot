@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from linkedin_bot.adapters.linkedin.models import (
     Company,
     Conversation,
+    Job,
     LinkedInError,
     Person,
     Profile,
@@ -26,6 +27,7 @@ ANCHORS = {
     "about": "About",
     "experience": "Experience",
     "no_results": "no results found",
+    "no_jobs": "no matching jobs",
 }
 PRONOUNS = re.compile(r"^[A-Za-z]+/[A-Za-z]+$")
 VOID = {"br", "img", "input", "meta", "link", "hr"}
@@ -225,6 +227,57 @@ def parse_companies(html: str) -> Parsed[Company]:
             skipped += 1
             continue
         items.append(Company(url=url, name=pieces[0], tagline=", ".join(pieces[1:3])))
+    return Parsed(tuple(items), skipped)
+
+
+def canonical_job(href: str) -> tuple[str, str] | None:
+    """(id, canonical URL) for a LinkedIn job link; relative links are what the site emits."""
+    parts = urlsplit(href)
+    relative = parts.scheme == "" and parts.netloc == ""
+    absolute = parts.scheme == "https" and parts.hostname == "www.linkedin.com"
+    match = re.fullmatch(r"/jobs/view/(\d+)/?", parts.path)
+    if not (relative or absolute) or not match:
+        return None
+    return match.group(1), f"https://www.linkedin.com/jobs/view/{match.group(1)}"
+
+
+def parse_jobs(html: str) -> Parsed[Job]:
+    main = main_region(html)
+    items: list[Job] = []
+    seen: set[str] = set()
+    skipped = 0
+    cards = 0
+    for row in (n for n in main.descendants() if n.tag == "li"):
+        found = next(
+            (
+                (link, job)
+                for link in row.descendants()
+                if link.tag == "a" and (job := canonical_job(link.attrs.get("href", "")))
+            ),
+            None,
+        )
+        if found is None:
+            continue
+        cards += 1
+        (identifier, url) = found[1]
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        pieces = fragments(row)
+        if len(pieces) < 2:
+            skipped += 1
+            continue
+        items.append(
+            Job(
+                id=identifier,
+                url=url,
+                title=pieces[0],
+                company=pieces[1],
+                location=pieces[2] if len(pieces) > 2 else None,
+            )
+        )
+    if cards == 0 and ANCHORS["no_jobs"] not in main.text().lower():
+        raise LinkedInError("layout_changed")
     return Parsed(tuple(items), skipped)
 
 

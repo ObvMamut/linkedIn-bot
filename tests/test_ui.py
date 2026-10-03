@@ -2,7 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from linkedin_bot.adapters.linkedin.models import Company, LinkedInError, Person
+from linkedin_bot.adapters.linkedin.models import Company, Job, LinkedInError, Person
 from linkedin_bot.adapters.linkedin.pages import Parsed
 from linkedin_bot.domain.models import CollectionPage, SourceObservation, digest, now
 from linkedin_bot.storage.database import Database
@@ -24,7 +24,31 @@ FIRMS = (
 )
 
 
+JOBS = tuple(
+    Job(
+        id=str(i),
+        url=f"https://www.linkedin.com/jobs/view/{i}",
+        title=title,
+        company=company,
+        location=location,
+    )
+    for i, (title, company, location) in enumerate(
+        (
+            ("Gardener", "Green Co", "Berlin"),
+            ("Security Engineer Intern", "Beta Security", "Berlin, Germany (On-site)"),
+            ("Security Engineer", "Alpha Labs", "Paris"),
+        ),
+        start=1,
+    )
+)
+
+
 class UIConnector(FakeConnector):
+    async def search_jobs(self, query, location=None, **kw):
+        self.calls.append(("jobs", query, location))
+        self._maybe_fail()
+        return Parsed(JOBS, 0)
+
     async def search_people(self, query, **kw):
         self.calls.append(("people", query))
         self._maybe_fail()
@@ -346,5 +370,47 @@ def test_menu_command_cancels_a_pending_input(tmp_path):
         assert await WorkspaceStore(db).awaiting() is not None
         await say(bot, "/menu")
         assert await WorkspaceStore(db).awaiting() is None
+
+    ui_env(tmp_path, scenario)
+
+
+def test_jobs_search_input_accepts_a_location_ranks_by_settings_and_stores_public_jobs(tmp_path):
+    async def scenario(db, api, bot, conn):
+        await db.update_preferences(
+            lambda p: p.model_copy(
+                update={
+                    "roles": ("security engineer",),
+                    "locations": ("Berlin",),
+                    "internship": True,
+                }
+            )
+        )
+        await tap(bot, "m:search")
+        await tap(bot, find(api.edits[-1][3], "Jobs"))
+        await say(bot, "security engineer in Berlin")
+        assert ("jobs", "security engineer", "Berlin") in conn.calls
+        text, markup = api.edits[-1][2], api.edits[-1][3]
+        assert "Security Engineer Intern" in text and "internship" in text  # best match first
+        assert "1/3" in text
+        await tap(bot, find(markup, "Next"))
+        assert "Security Engineer" in api.edits[-1][2]
+        await tap(bot, find(api.edits[-1][3], "Next"))
+        assert "outside your settings" in api.edits[-1][2] and "Gardener" in api.edits[-1][2]
+        stored = await db.opportunities(since=None)
+        assert {o.external_id for o in stored} == {"1", "2", "3"}
+        assert {o.source for o in stored} == {"linkedin"}
+        assert next(o for o in stored if o.external_id == "2").company == "Beta Security"
+
+    ui_env(tmp_path, scenario)
+
+
+def test_saved_job_searches_report_new_postings_only(tmp_path):
+    async def scenario(db, api, bot, conn):
+        store = WorkspaceStore(db)
+        saved = await store.save_search("jobs", "security engineer in Berlin", "Berlin jobs")
+        await store.record_run(saved, ["https://www.linkedin.com/jobs/view/1"])
+        await tap(bot, "m:saved")
+        await tap(bot, find(api.edits[-1][3], "Berlin jobs"))
+        assert "2 new" in api.edits[-1][2] and ("jobs", "security engineer", "Berlin") in conn.calls
 
     ui_env(tmp_path, scenario)

@@ -5,7 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -767,6 +767,29 @@ class Database:
                     "WHERE id=?",
                     ("pending" if retry else "blocked", due.isoformat(), reason, work.id),
                 )
+
+        await self.call(write)
+
+    async def save_observations(self, items: Sequence[SourceObservation]) -> None:
+        """Record postings seen outside a scheduled read (for example a LinkedIn jobs search)."""
+
+        def write(connection: sqlite3.Connection) -> None:
+            with transaction(connection):
+                for observation in items:
+                    stamp = observation.observed_at.isoformat()
+                    connection.execute(
+                        "INSERT INTO observations VALUES (?,?,?,?,?,?) ON CONFLICT "
+                        "(source,external_id,content_hash) "
+                        "DO UPDATE SET last_seen=excluded.last_seen",
+                        (
+                            observation.source,
+                            observation.external_id,
+                            observation.content_hash,
+                            observation.model_dump_json(),
+                            stamp,
+                            stamp,
+                        ),
+                    )
 
         await self.call(write)
 

@@ -156,3 +156,54 @@ def test_people_cards_pick_the_text_link_not_the_avatar_link():
        <span>Engineer</span></a></div></div></main>"""
     [person] = parse_people(html).items
     assert (person.name, person.headline) == ("Jane Doe", "Engineer")
+
+
+JOBS = """
+<main><div><ul>
+ <li><div><a href="/jobs/view/4012345678/?trk=flagship3_search_srp_jobs">
+   <span>Security Intern (m/f/d)</span><span>Security Intern (m/f/d)</span></a>
+   <span>Acme Cyber</span><span>Berlin, Germany (On-site)</span></div></li>
+ <li><a href="https://www.linkedin.com/jobs/view/4099/?trk=x"><span>Data Intern</span></a>
+   <span>Beta</span><span>Remote</span></li>
+ <li><a href="/jobs/view/12"><span>Broken card</span></a></li>
+ <li><span>Unrelated list item</span></li>
+ <li><a href="/jobs/view/4012345678/?trk=again"><span>Duplicate</span></a>
+   <span>Acme Cyber</span><span>Berlin</span></li>
+</ul></main>"""
+
+
+def test_jobs_parse_title_company_location_and_dedupe_by_id():
+    from linkedin_bot.adapters.linkedin.pages import parse_jobs
+
+    parsed = parse_jobs(JOBS)
+    assert [(j.id, j.title, j.company, j.location) for j in parsed.items] == [
+        ("4012345678", "Security Intern (m/f/d)", "Acme Cyber", "Berlin, Germany (On-site)"),
+        ("4099", "Data Intern", "Beta", "Remote"),
+    ]
+    assert parsed.items[0].url == "https://www.linkedin.com/jobs/view/4012345678"
+    assert parsed.skipped == 1  # the card with one text piece; the repeat id is just ignored
+
+
+def test_jobs_zero_results_and_unknown_pages():
+    from linkedin_bot.adapters.linkedin.pages import parse_jobs
+
+    assert parse_jobs("<main><div>No matching jobs found.</div></main>").items == ()
+    with pytest.raises(LinkedInError) as caught:
+        parse_jobs("<main><div>Something new</div></main>")
+    assert caught.value.code == "layout_changed"
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://evil.example/jobs/view/123",
+        "https://www.linkedin.com.evil.example/jobs/view/123",
+        "javascript:alert(1)",
+        "/jobs/collections/recommended",
+        "/jobs/view/abc",
+    ],
+)
+def test_job_links_must_be_real_job_urls(href):
+    from linkedin_bot.adapters.linkedin.pages import canonical_job
+
+    assert canonical_job(href) is None

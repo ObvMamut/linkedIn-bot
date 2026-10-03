@@ -13,6 +13,7 @@ from linkedin_bot.adapters.linkedin.limits import Limiter
 from linkedin_bot.adapters.linkedin.models import (
     Company,
     Conversation,
+    Job,
     LinkedInError,
     Person,
     Profile,
@@ -23,6 +24,7 @@ from linkedin_bot.adapters.linkedin.pages import (
     canonical,
     detect_state,
     parse_companies,
+    parse_jobs,
     parse_messages,
     parse_people,
     parse_profile,
@@ -30,7 +32,7 @@ from linkedin_bot.adapters.linkedin.pages import (
 
 T = TypeVar("T")
 BASE = "https://www.linkedin.com"
-TTL = {"messages": 60.0, "people": 300.0, "companies": 300.0, "profile": 600.0}
+TTL = {"messages": 60.0, "people": 300.0, "companies": 300.0, "profile": 600.0, "jobs": 300.0}
 CHALLENGE_COOLDOWN_HOURS = 6
 RATE_LIMIT_COOLDOWN_HOURS = 1
 
@@ -40,6 +42,7 @@ WAIT = {
     "people": 'main [role="listitem"] a[href*="/in/"]',
     "companies": 'main [role="listitem"] a[href*="/company/"]',
     "profile": "main h2",
+    "jobs": 'main a[href*="/jobs/view/"]',
 }
 
 
@@ -146,6 +149,23 @@ class LinkedInConnector:
             return parse_companies(await self.read(url, WAIT["companies"]))
 
         return await self.cached(("companies", query.lower()), TTL["companies"], refresh, produce)
+
+    async def search_jobs(
+        self, query: str, location: str | None = None, *, refresh: bool = False
+    ) -> Parsed[Job]:
+        query = check_query(query)
+        place = (location or "").strip() or None
+        if place is not None and len(place) > 60:
+            raise LinkedInError("invalid_query")
+        url = f"{BASE}/jobs/search/?keywords={quote(query, safe='')}"
+        if place:
+            url += f"&location={quote(place, safe='')}"
+
+        async def produce() -> Parsed[Job]:
+            return parse_jobs(await self.read(url, WAIT["jobs"]))
+
+        key = ("jobs", query.lower(), (place or "").lower())
+        return await self.cached(key, TTL["jobs"], refresh, produce)
 
     async def profile(self, target: str | None, *, refresh: bool = False) -> Profile:
         url = f"{BASE}/in/me/" if target is None else validate_target(target)
