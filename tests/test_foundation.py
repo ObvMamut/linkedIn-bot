@@ -27,7 +27,13 @@ from linkedin_bot.domain.policy import block_reasons
 from linkedin_bot.runtime.config import Config, InferenceConfig, load_config
 from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
 from linkedin_bot.runtime.privacy import BoundaryError, RedactedFormatter, safe_file
-from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError, apply_migrations
+from linkedin_bot.storage.database import (
+    Database,
+    RevisionConflict,
+    SchemaError,
+    apply_migrations,
+    migration_scripts,
+)
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.workflows.executor import DraftExecutor
 
@@ -572,7 +578,10 @@ def test_database_rejects_newer_schema_and_keeps_state(tmp_path):
         db = Database(tmp_path)
         try:
             await db.open()
-            await db.call(lambda c: c.execute("INSERT INTO schema_migrations VALUES (2,'future')"))
+            future = len(migration_scripts()) + 1
+            await db.call(
+                lambda c: c.execute("INSERT INTO schema_migrations VALUES (?,'future')", (future,))
+            )
             await db.close()
             db = Database(tmp_path)
             with pytest.raises(SchemaError, match="newer_schema"):
@@ -582,7 +591,9 @@ def test_database_rejects_newer_schema_and_keeps_state(tmp_path):
 
     asyncio.run(scenario())
     with sqlite3.connect(tmp_path / "state.sqlite3") as c:
-        assert c.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (2,)
+        assert c.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            len(migration_scripts()) + 1,
+        )
 
 
 def test_changed_artifact_blocks_action(tmp_path):
@@ -637,7 +648,14 @@ def test_restore_ready_actions_require_audit(tmp_path):
 def test_collect_rejects_invalid_limit_before_scheduling_work(tmp_path):
     def invoke(*args):
         return subprocess.run(
-            [sys.executable, "-m", "linkedin_bot.runtime.cli", "--data-dir", str(tmp_path / "data"), *args],
+            [
+                sys.executable,
+                "-m",
+                "linkedin_bot.runtime.cli",
+                "--data-dir",
+                str(tmp_path / "data"),
+                *args,
+            ],
             text=True,
             capture_output=True,
         )
@@ -649,7 +667,9 @@ def test_collect_rejects_invalid_limit_before_scheduling_work(tmp_path):
         db = Database(tmp_path / "data")
         try:
             await db.open()
-            return await db.call(lambda c: c.execute("SELECT COUNT(*) FROM work_items").fetchone()[0])
+            return await db.call(
+                lambda c: c.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+            )
         finally:
             await db.close()
 

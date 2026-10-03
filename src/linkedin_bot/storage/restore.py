@@ -7,6 +7,7 @@ from pathlib import Path
 
 from linkedin_bot.domain.models import Artifact, Policy, digest
 from linkedin_bot.runtime.privacy import BoundaryError, private_directory, safe_file
+from linkedin_bot.storage.database import migration_scripts
 
 
 def restore_backup(backup: Path, root: Path) -> None:
@@ -16,7 +17,9 @@ def restore_backup(backup: Path, root: Path) -> None:
     if manifest_path.stat().st_size > 1_000_000:
         raise BoundaryError("backup_manifest_too_large")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("app_version") != "0.1.0" or manifest.get("schema_version") != 1:
+    if manifest.get("app_version") != "0.1.0" or manifest.get("schema_version") not in range(
+        1, len(migration_scripts()) + 1
+    ):
         raise BoundaryError("backup_version")
     checksums = manifest.get("checksums")
     if not isinstance(checksums, dict) or "state.sqlite3" not in checksums:
@@ -44,7 +47,9 @@ def restore_backup(backup: Path, root: Path) -> None:
                 raise BoundaryError("backup_integrity")
             if list(connection.execute("PRAGMA foreign_key_check")):
                 raise BoundaryError("backup_foreign_keys")
-            if connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() != (1,):
+            if connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() != (
+                manifest["schema_version"],
+            ):
                 raise BoundaryError("backup_schema")
             expected = {"state.sqlite3"}
             for (snapshot,) in connection.execute("SELECT snapshot FROM artifacts"):
@@ -72,6 +77,14 @@ def restore_backup(backup: Path, root: Path) -> None:
                 "WHERE state IN ('ready','executing','unknown')"
             )
             connection.execute("UPDATE approvals SET invalidated=1 WHERE consumed_at IS NULL")
+            if connection.execute(
+                "SELECT count(*) FROM sqlite_master WHERE name='telegram_binding'"
+            ).fetchone()[0]:
+                # A restored installation must be paired again before it talks to anyone.
+                connection.execute(
+                    "UPDATE telegram_binding SET user_id=NULL,chat_id=NULL,paired_at=NULL,"
+                    "code_hash=NULL,code_expires_at=NULL,code_attempts=0,last_update_id=0"
+                )
             connection.execute("UPDATE work_items SET state='pending' WHERE state='running'")
         marker = safe_file(root, "restore-incomplete")
         marker.touch(mode=0o600, exist_ok=False)

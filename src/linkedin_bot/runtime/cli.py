@@ -15,13 +15,16 @@ from linkedin_bot.adapters.ats import ATSSource, Board, Provider
 from linkedin_bot.adapters.browser_probe import browser_smoke
 from linkedin_bot.adapters.ollama import OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
+from linkedin_bot.adapters.telegram import HttpTelegram
 from linkedin_bot.domain.models import identifier, now
 from linkedin_bot.runtime.config import Config, load_config
 from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
 from linkedin_bot.runtime.privacy import BoundaryError, configure_logging
 from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError
 from linkedin_bot.storage.restore import restore_backup
+from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.workflows.monitor import run_one
+from linkedin_bot.workflows.telegram_bot import Bot, poll_once
 
 
 def emit(content: object) -> None:
@@ -50,6 +53,9 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--interval-seconds", type=int, default=21600)
     run = commands.add_parser("run", help="Run explicitly configured read work in the foreground")
     run.add_argument("--once", action="store_true", help="Process at most one due work item")
+    commands.add_parser("pair", help="Print a one-use Telegram pairing code (valid ten minutes)")
+    telegram = commands.add_parser("telegram", help="Poll Telegram in the foreground")
+    telegram.add_argument("--once", action="store_true", help="Handle one polling batch")
     probe = commands.add_parser("probe", help="Explicit bounded feasibility checks")
     probe.add_argument("target", choices=("ollama", "browser"))
     probe.add_argument("--model", help="Installed model for a synthetic probe; never downloads")
@@ -141,6 +147,16 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                         await http.close()
                 else:
                     emit({"scheduled": board.model_dump(), "execution": "foreground run required"})
+            elif args.command == "pair":
+                emit(
+                    {
+                        "pairing_code": await TelegramStore(database).begin_pairing(now()),
+                        "instruction": "Send /start <code> to your bot from a private chat",
+                    }
+                )
+            elif args.command == "telegram":
+                await telegram_foreground(database, once=args.once)
+                emit({"stopped": True})
             elif args.command == "run":
                 await foreground(database, once=args.once)
                 emit({"stopped": True})
@@ -153,7 +169,9 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                         **artifact_health,
                         "capabilities": {
                             "linkedin": "pending_login_and_read_gates",
-                            "telegram": "pending_token_pairing_M2",
+                            "telegram": "paired"
+                            if await TelegramStore(database).binding()
+                            else "unpaired",
                             "inference": "not_evaluated",
                             "employer_effects": "disabled",
                             "deepseek": "disabled",
@@ -184,6 +202,33 @@ async def foreground(database: Database, *, once: bool) -> None:
                     pass
     finally:
         await http.close()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(signum)
+
+
+async def telegram_foreground(database: Database, *, once: bool) -> None:
+    api = HttpTelegram()
+    bot = Bot(database, api)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+    try:
+        if await bot.store.binding() is None:
+            raise BoundaryError("not_paired_run_pair_first")
+        while not stop.is_set():
+            polling = asyncio.ensure_future(poll_once(bot, api))
+            waiting = asyncio.ensure_future(stop.wait())
+            await asyncio.wait({polling, waiting}, return_when=asyncio.FIRST_COMPLETED)
+            waiting.cancel()
+            if not polling.done():
+                polling.cancel()
+                break
+            polling.result()
+            if once:
+                break
+    finally:
+        await api.close()
         for signum in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(signum)
 

@@ -76,6 +76,14 @@ def apply_migrations(connection: sqlite3.Connection, migrations: list[str]) -> N
             )
 
 
+def migration_scripts() -> list[str]:
+    entries = sorted(
+        files("linkedin_bot.storage").joinpath("migrations").iterdir(),
+        key=lambda entry: entry.name,
+    )
+    return [entry.read_text() for entry in entries if entry.name.endswith(".sql")]
+
+
 class Database:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -99,13 +107,7 @@ class Database:
             path.chmod(0o600)
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA busy_timeout=5000")
-            migration_files = sorted(
-                files("linkedin_bot.storage").joinpath("migrations").iterdir(),
-                key=lambda entry: entry.name,
-            )
-            migrations = [
-                entry.read_text() for entry in migration_files if entry.name.endswith(".sql")
-            ]
+            migrations = migration_scripts()
             present = connection.execute(
                 "SELECT count(*) FROM sqlite_master WHERE name='schema_migrations'"
             ).fetchone()[0]
@@ -141,7 +143,16 @@ class Database:
         def read(connection: sqlite3.Connection) -> CandidateProfile:
             profile_id, revision = connection.execute("SELECT id,revision FROM profile").fetchone()
             fact_ids = tuple(row[0] for row in connection.execute("SELECT DISTINCT id FROM facts"))
-            return CandidateProfile(id=profile_id, revision=revision, fact_ids=fact_ids)
+            baseline = connection.execute(
+                "SELECT id FROM artifacts WHERE json_extract(snapshot,'$.kind')='baseline_cv' "
+                "ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            return CandidateProfile(
+                id=profile_id,
+                revision=revision,
+                fact_ids=fact_ids,
+                baseline_artifact_id=baseline[0] if baseline else None,
+            )
 
         return await self.call(read)
 
@@ -500,6 +511,9 @@ class Database:
                 "profile_revision": connection.execute("SELECT revision FROM profile").fetchone()[
                     0
                 ],
+                "paused": bool(
+                    connection.execute("SELECT paused FROM runtime_state").fetchone()[0]
+                ),
                 "facts": connection.execute("SELECT count(DISTINCT id) FROM facts").fetchone()[0],
                 "observations": connection.execute("SELECT count(*) FROM observations").fetchone()[
                     0
@@ -607,7 +621,13 @@ class Database:
                 manifest = temporary / "manifest.json"
                 manifest.write_text(
                     json.dumps(
-                        {"app_version": "0.1.0", "schema_version": 1, "checksums": checksums},
+                        {
+                            "app_version": "0.1.0",
+                            "schema_version": connection.execute(
+                                "SELECT MAX(version) FROM schema_migrations"
+                            ).fetchone()[0],
+                            "checksums": checksums,
+                        },
                         sort_keys=True,
                     )
                 )

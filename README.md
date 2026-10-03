@@ -1,7 +1,7 @@
 # Local job-search agent
 
-M0 feasibility work and M1 foundations are implemented. This is a Linux, single-user,
-foreground Python application. Telegram onboarding, LinkedIn monitoring, evaluated
+M0 feasibility work, M1 foundations and M2 Telegram pairing/onboarding are implemented. This is a Linux, single-user,
+foreground Python application. LinkedIn monitoring, evaluated
 inference, materials generation, and employer-facing execution belong to later milestones.
 The architecture and its requirements remain in [docs/architecture](docs/architecture/README.md).
 
@@ -48,6 +48,21 @@ uv run linkedin-bot run
 
 Use `run --once` to process at most one due item. Ctrl-C or SIGTERM stops claims, settles
 the bounded current read, closes clients/storage, and releases the kernel-held lock.
+## Telegram (M2)
+
+Create a bot with BotFather and export `TELEGRAM_BOT_TOKEN` in your shell (never in a file
+or chat). Then:
+
+```sh
+uv run linkedin-bot pair        # prints a one-use code, valid ten minutes
+# send "/start <code>" to the bot from a private chat
+uv run linkedin-bot telegram    # foreground long polling; --once handles one batch
+```
+
+Only the paired user and private chat are answered; everyone else is silently ignored.
+Onboarding (roles, locations, exclusions, work eligibility, pasted CV) is resumable and
+stored locally. Restoring a backup clears the pairing.
+
 `pause` stops new claims; `resume` resumes reads and retains draft-only restrictions.
 Overdue periodic work coalesces into one current read. The application does not run when
 stopped or while the laptop sleeps. No recurring schedule was installed during development.
