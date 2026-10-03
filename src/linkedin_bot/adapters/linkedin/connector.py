@@ -29,11 +29,19 @@ CHALLENGE_COOLDOWN_HOURS = 6
 RATE_LIMIT_COOLDOWN_HOURS = 1
 
 
+WAIT = {
+    "messages": 'ul[aria-label="Conversation List"]',
+    "people": 'main [role="listitem"] a[href*="/in/"]',
+    "companies": 'main [role="listitem"] a[href*="/company/"]',
+    "profile": "main h2",
+}
+
+
 class Page(Protocol):
     @property
     def url(self) -> str: ...
 
-    async def goto(self, url: str) -> object: ...
+    async def goto(self, url: str, wait_for: str | None = None) -> object: ...
 
     async def content(self) -> str: ...
 
@@ -63,10 +71,10 @@ class LinkedInConnector:
         self.limiter = limiter
         self.lock = asyncio.Lock()  # reads share one page; never interleave navigations
 
-    async def load(self, url: str) -> tuple[SessionState, str]:
+    async def load(self, url: str, wait_for: str | None = None) -> tuple[SessionState, str]:
         async with self.lock:
             await self.limiter.acquire()
-            await self.page.goto(url)
+            await self.page.goto(url, wait_for)
             html = await self.page.content()
             if "too many requests" in html.lower():
                 self.limiter.trip(RATE_LIMIT_COOLDOWN_HOURS)
@@ -76,8 +84,8 @@ class LinkedInConnector:
                 self.limiter.trip(CHALLENGE_COOLDOWN_HOURS)
             return state, html
 
-    async def read(self, url: str) -> str:
-        state, html = await self.load(url)
+    async def read(self, url: str, wait_for: str | None = None) -> str:
+        state, html = await self.load(url, wait_for)
         if state != "ready":
             raise LinkedInError(state)
         return html
@@ -87,21 +95,21 @@ class LinkedInConnector:
         return state
 
     async def messages(self, count: int) -> Parsed[Conversation]:
-        parsed = parse_messages(await self.read(f"{BASE}/messaging/"))
+        parsed = parse_messages(await self.read(f"{BASE}/messaging/", WAIT["messages"]))
         return Parsed(parsed.items[: max(1, count)], parsed.skipped)
 
     async def search_people(self, query: str) -> Parsed[Person]:
         keywords = quote(check_query(query), safe="")
-        return parse_people(await self.read(f"{BASE}/search/results/people/?keywords={keywords}"))
+        url = f"{BASE}/search/results/people/?keywords={keywords}"
+        return parse_people(await self.read(url, WAIT["people"]))
 
     async def search_companies(self, query: str) -> Parsed[Company]:
         keywords = quote(check_query(query), safe="")
-        return parse_companies(
-            await self.read(f"{BASE}/search/results/companies/?keywords={keywords}")
-        )
+        url = f"{BASE}/search/results/companies/?keywords={keywords}"
+        return parse_companies(await self.read(url, WAIT["companies"]))
 
     async def profile(self, target: str | None) -> Profile:
         url = f"{BASE}/in/me/" if target is None else validate_target(target)
         if not re.fullmatch(rf"{re.escape(BASE)}/in/[^/]+/?", url):
             raise LinkedInError("invalid_target")
-        return parse_profile(await self.read(url), url)
+        return parse_profile(await self.read(url, WAIT["profile"]), url)

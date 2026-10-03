@@ -9,74 +9,116 @@ from linkedin_bot.adapters.linkedin.pages import (
     parse_profile,
 )
 
-# UNVERIFIED layout: structured by accessibility labels and data attributes, to be reconciled
-# against real redacted pages in the supervised live step.
+# Structure mirrors pages observed live on 2026-10-03 (class names are obfuscated hashes and
+# are deliberately absent; `data-view-name` markers appear on some loads only, so they are not
+# used). All names and text here are synthetic.
 MESSAGES = """
-<main aria-label="Messaging"><ul aria-label="Conversations">
- <li data-conversation-id="2-abc" data-unread="true">
-  <h3>Jane Doe</h3><p>Are you free Tuesday?</p></li>
- <li data-conversation-id="2-def"><h3>Acme Recruiting</h3><p>Thanks for applying</p></li>
- <li><h3>Broken row without id</h3></li>
-</ul></main>"""
+<main id="main"><div><ul aria-label="Conversation List">
+ <li></li>
+ <li id="ember47"><div id="conversation-card-ember48"><div>
+   <span>Status is offline</span>
+   <h3><div><span>Jane Doe</span></div></h3><time>Sep 30</time><span>Sep 30</span>
+   <p>Are you free Tuesday?</p><span>. Active conversation</span>
+   <span>Unread message</span>
+ </div></div></li>
+ <li id="ember55"><div id="conversation-card-ember56"><div>
+   <h3><div><span>Acme Recruiting</span></div></h3><time>Sep 29</time>
+   <p>Thanks for applying</p>
+ </div></div></li>
+ <li><span>Orphan row without a heading</span></li>
+</ul></div></main>"""
 PEOPLE = """
-<div aria-label="Search results"><ul>
- <li><a href="https://www.linkedin.com/in/jane-doe/"><span class="name">Jane Doe</span></a>
-  <div class="headline">ML Engineer at Acme</div><div class="location">Berlin</div></li>
- <li><a href="https://www.linkedin.com/in/john-roe"><span class="name">John Roe</span></a>
-  <div class="headline">Recruiter</div></li>
- <li><span class="name">No link</span></li>
-</ul></div>"""
+<main id="workspace"><div role="list">
+ <div role="listitem"><div>
+  <a href="https://www.linkedin.com/in/jane-doe"><div><div>
+   <span>Jane Doe</span><span>Jane Doe</span><span>• 3rd+</span>
+   <span>ML Engineer at Acme</span><span>Paris, France</span></div></div></a>
+  <span>Connect</span><span>Past: Data Scientist at Beta</span></div><hr role="presentation"></div>
+ <div role="listitem"><div>
+  <a href="https://www.linkedin.com/in/john-roe/"><span>John Roe</span><span>John Roe</span>
+   <span>Recruiter</span></a></div></div>
+ <div role="listitem"><div><span>No link</span></div></div>
+</div></main>"""
 COMPANIES = """
-<div aria-label="Search results"><ul>
- <li><a href="https://www.linkedin.com/company/acme/"><span class="name">Acme</span></a>
-  <div class="headline">Rockets for everyone</div></li>
-</ul></div>"""
+<main id="workspace"><div role="list">
+ <div role="listitem"><div>
+  <a href="https://www.linkedin.com/company/acme/"><span>Acme</span></a>
+  <span>Aerospace</span><span>Miami, Florida</span><span>Follow</span>
+  <span>Rockets for everyone</span><span>733,216 followers</span></div></div>
+</div></main>"""
 PROFILE = """
-<main aria-label="Profile"><h1>Jane Doe</h1>
- <div data-field="headline">ML Engineer</div><div data-field="location">Berlin</div>
- <section aria-label="About"><p>I build models.</p></section>
- <section aria-label="Experience"><ul>
-  <li>Acme, 2022-2024</li><li>Beta, 2020-2022</li></ul></section>
-</main>"""
+<main id="workspace"><section aria-label="Primary content">
+ <h2>Jane Doe</h2><span>She/Her</span><span>Verify in 2 minutes</span>
+ <span>ML engineer building search</span><span>Acme</span><span>Paris, France</span>
+ <span>·</span><a>Contact info</a>
+ <section><h2>About</h2><div><span>I build models.</span></div></section>
+ <section><h2>Experience</h2><ul><li>Acme, 2022-2024</li><li>Beta, 2020-2022</li></ul></section>
+</section></main>"""
 SIGNED_IN = '<header></header><main id="workspace"><p>feed</p></main>'
 
 
-def test_messages_parse_rows_and_count_skipped():
+def test_messages_use_the_list_label_and_skip_only_unusable_rows():
     parsed = parse_messages(MESSAGES)
-    assert [(c.id, c.title, c.unread) for c in parsed.items] == [
-        ("2-abc", "Jane Doe", True),
-        ("2-def", "Acme Recruiting", False),
+    assert [(c.title, c.snippet, c.when, c.unread) for c in parsed.items] == [
+        ("Jane Doe", "Are you free Tuesday?", "Sep 30", True),
+        ("Acme Recruiting", "Thanks for applying", "Sep 29", False),
     ]
-    assert parsed.items[0].snippet == "Are you free Tuesday?" and parsed.skipped == 1
+    assert parsed.skipped == 1  # the empty <li> is padding, the headingless row is skipped
 
 
-def test_people_and_companies_require_a_profile_link():
+def test_people_parse_name_headline_location_and_dedupe_hidden_duplicates():
     people = parse_people(PEOPLE)
-    assert [(p.name, p.url, p.location) for p in people.items] == [
-        ("Jane Doe", "https://www.linkedin.com/in/jane-doe", "Berlin"),
-        ("John Roe", "https://www.linkedin.com/in/john-roe", None),
+    assert [(p.name, p.url, p.headline, p.location) for p in people.items] == [
+        (
+            "Jane Doe",
+            "https://www.linkedin.com/in/jane-doe",
+            "ML Engineer at Acme",
+            "Paris, France",
+        ),
+        ("John Roe", "https://www.linkedin.com/in/john-roe", "Recruiter", None),
     ]
     assert people.skipped == 1
+
+
+def test_companies_parse_name_and_industry_location():
     [firm] = parse_companies(COMPANIES).items
-    assert (firm.name, firm.url) == ("Acme", "https://www.linkedin.com/company/acme")
+    assert firm.name == "Acme" and firm.url == "https://www.linkedin.com/company/acme"
+    assert firm.tagline == "Aerospace, Miami, Florida"
 
 
-def test_profile_fields():
+def test_profile_fields_from_headings_and_fragments():
     profile = parse_profile(PROFILE, "https://www.linkedin.com/in/jane-doe")
-    assert profile.name == "Jane Doe" and profile.headline == "ML Engineer"
+    assert profile.name == "Jane Doe"
+    assert profile.headline == "ML engineer building search"  # pronouns and badges skipped
+    assert profile.location == "Paris, France"  # the fragment right before the separator
     assert profile.about == "I build models."
     assert profile.experience == ("Acme, 2022-2024", "Beta, 2020-2022")
 
 
-def test_present_but_empty_containers_mean_none_not_layout_changed():
-    assert parse_messages('<ul aria-label="Conversations"></ul>').items == ()
-    assert parse_people('<div aria-label="Search results"><ul></ul></div>').items == ()
+def test_profile_without_about_or_experience_is_still_valid():
+    html = "<main><h2>Jane Doe</h2><span>Engineer</span><span>·</span></main>"
+    profile = parse_profile(html, "https://www.linkedin.com/in/jane-doe")
+    assert (profile.name, profile.headline, profile.about, profile.experience) == (
+        "Jane Doe",
+        "Engineer",
+        "",
+        (),
+    )
+
+
+def test_zero_results_means_none_but_an_unknown_page_is_layout_changed():
+    empty = "<main><div><h2>No results found</h2></div></main>"
+    assert parse_people(empty).items == () and parse_companies(empty).items == ()
+    assert parse_messages('<main><ul aria-label="Conversation List"></ul></main>').items == ()
+    with pytest.raises(LinkedInError) as caught:
+        parse_people("<main><div>Something new</div></main>")
+    assert caught.value.code == "layout_changed"
 
 
 @pytest.mark.parametrize(
     "parse", [parse_messages, parse_people, parse_companies, lambda h: parse_profile(h, "u")]
 )
-def test_missing_anchor_is_layout_changed(parse):
+def test_missing_main_region_is_layout_changed(parse):
     with pytest.raises(LinkedInError) as caught:
         parse("<html><body><div>Something new</div></body></html>")
     assert caught.value.code == "layout_changed"
@@ -105,3 +147,12 @@ def test_missing_anchor_is_layout_changed(parse):
 )
 def test_detect_state(url, html, expected):
     assert detect_state(url, html) == expected
+
+
+def test_people_cards_pick_the_text_link_not_the_avatar_link():
+    html = """<main><div role="list"><div role="listitem">
+      <a href="https://www.linkedin.com/in/jane-doe"><img alt=""></a>
+      <a href="https://www.linkedin.com/in/jane-doe"><span>Jane Doe</span><span>Jane Doe</span>
+       <span>Engineer</span></a></div></div></main>"""
+    [person] = parse_people(html).items
+    assert (person.name, person.headline) == ("Jane Doe", "Engineer")

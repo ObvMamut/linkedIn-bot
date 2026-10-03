@@ -20,9 +20,11 @@ class FakePage:
         self.pages = pages  # url prefix -> (final_url, html)
         self.url = ""
         self.visited = []
+        self.waited = []
 
-    async def goto(self, url):
+    async def goto(self, url, wait_for=None):
         self.visited.append(url)
+        self.waited.append(wait_for)
         for prefix, (final, html) in self.pages.items():
             if url.startswith(prefix):
                 self.url, self._html = final, html
@@ -48,7 +50,7 @@ def run(coro):
 
 
 def with_nav(html):
-    return SIGNED_IN + html
+    return html  # the fixtures carry their own <main>, which is what marks a signed-in page
 
 
 def test_status_and_reads_on_a_ready_session():
@@ -73,7 +75,7 @@ def test_status_and_reads_on_a_ready_session():
         }
     )
     assert run(conn.status()) == "ready"
-    assert [c.id for c in run(conn.messages(1)).items] == ["2-abc"]
+    assert [c.title for c in run(conn.messages(1)).items] == ["Jane Doe"]
     assert len(run(conn.search_people("ml engineer berlin")).items) == 2
     assert (
         page.visited[-1]
@@ -202,3 +204,117 @@ def test_manual_login_command_is_a_plain_browser_on_the_app_profile(tmp_path):
     assert command[-1] == "https://www.linkedin.com/login"
     joined = " ".join(command)
     assert "remote-debugging" not in joined and "enable-automation" not in joined
+
+
+def test_read_only_page_waits_for_main_and_tolerates_pages_without_it():
+    from playwright.async_api import Error as PlaywrightError
+
+    from linkedin_bot.adapters.linkedin.session import ReadOnlyPage
+
+    class Raw:
+        url = "https://www.linkedin.com/messaging/"
+        calls = []
+
+        def __init__(self, fail_wait=False):
+            self.fail_wait = fail_wait
+
+        async def goto(self, url, **options):
+            self.calls.append(("goto", url, options))
+
+        async def wait_for_selector(self, selector, **options):
+            self.calls.append(("wait", selector, options))
+            if self.fail_wait:
+                raise PlaywrightError("timeout")
+
+        async def content(self):
+            return "<main></main>"
+
+        async def click(self, *a):  # must stay unreachable through the wrapper
+            raise AssertionError
+
+    async def scenario(fail_wait):
+        Raw.calls = []
+        page = ReadOnlyPage(Raw(fail_wait), settle_seconds=0)
+        await page.goto("https://www.linkedin.com/messaging/")
+        return page.url, await page.content(), hasattr(page, "click")
+
+    url, html, has_click = run(scenario(False))
+    assert (url, html, has_click) == ("https://www.linkedin.com/messaging/", "<main></main>", False)
+    assert Raw.calls[0][2]["wait_until"] == "domcontentloaded"
+    assert Raw.calls[1][1] == "main"
+    assert run(scenario(True))[1] == "<main></main>"  # a login page has no <main>; read it anyway
+
+
+def test_read_only_page_waits_until_the_content_stops_changing():
+    from linkedin_bot.adapters.linkedin.session import ReadOnlyPage
+
+    class Growing:
+        url = "u"
+
+        def __init__(self):
+            self.sizes = ["a", "ab", "abc", "abcd", "abcd", "abcd"]
+            self.reads = 0
+
+        async def goto(self, url, **options):
+            return None
+
+        async def wait_for_selector(self, selector, **options):
+            return None
+
+        async def content(self):
+            self.reads += 1
+            return self.sizes.pop(0) if len(self.sizes) > 1 else self.sizes[0]
+
+    raw = Growing()
+    run(ReadOnlyPage(raw, settle_seconds=0).goto("https://www.linkedin.com/x"))
+    assert raw.reads == 5  # grew three times, then two identical reads
+
+
+def test_each_read_names_the_element_it_expects():
+    conn, page, _ = connector(
+        {
+            "https://www.linkedin.com/messaging": ("https://www.linkedin.com/messaging/", MESSAGES),
+            "https://www.linkedin.com/search/results/people": (
+                "https://www.linkedin.com/search/results/people/",
+                PEOPLE,
+            ),
+            "https://www.linkedin.com/search/results/companies": (
+                "https://www.linkedin.com/search/results/companies/",
+                COMPANIES,
+            ),
+            "https://www.linkedin.com/in/jane-doe": (
+                "https://www.linkedin.com/in/jane-doe",
+                PROFILE,
+            ),
+        }
+    )
+    run(conn.messages(1))
+    run(conn.search_people("x"))
+    run(conn.search_companies("x"))
+    run(conn.profile("https://www.linkedin.com/in/jane-doe"))
+    assert page.waited == [
+        'ul[aria-label="Conversation List"]',
+        'main [role="listitem"] a[href*="/in/"]',
+        'main [role="listitem"] a[href*="/company/"]',
+        "main h2",
+    ]
+
+
+def test_read_only_page_waits_for_the_expected_element_too():
+    from linkedin_bot.adapters.linkedin.session import ReadOnlyPage
+
+    class Raw:
+        url = "u"
+        waits = []
+
+        async def goto(self, url, **options):
+            return None
+
+        async def wait_for_selector(self, selector, **options):
+            Raw.waits.append(selector)
+
+        async def content(self):
+            return "x"
+
+    run(ReadOnlyPage(Raw(), settle_seconds=0).goto("https://www.linkedin.com/x", "ul.items"))
+    assert Raw.waits == ["main", "ul.items"]

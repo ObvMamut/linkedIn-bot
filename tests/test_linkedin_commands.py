@@ -27,7 +27,7 @@ class FakeConnector:
     def __init__(self, error=None, state="ready", conversations=None):
         self.error, self.state, self.calls = error, state, []
         self.conversations = conversations or (
-            Conversation(id="1", title="Jane Doe", snippet=SECRET, unread=True),
+            Conversation(id="0", title="Jane Doe", snippet=SECRET, unread=True, when="Sep 30"),
             Conversation(id="2", title="Acme", snippet="Thanks", unread=False),
         )
 
@@ -104,10 +104,10 @@ def last(api):
     return api.sent[-1][1]
 
 
-def test_status_reports_state_and_unverified_layout(tmp_path):
+def test_status_reports_state_and_when_the_layout_was_last_verified(tmp_path):
     connector = FakeConnector()
     api, db = ask(tmp_path, connector, "/li_status")
-    assert "ready" in last(api) and "layout unverified" in last(api)
+    assert "ready" in last(api) and "verified against live pages on 2026-10-03" in last(api)
     state = asyncio.run(_state(tmp_path))
     assert state[0] == "ready" and state[1] is not None
 

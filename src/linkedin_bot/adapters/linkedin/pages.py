@@ -1,8 +1,9 @@
 """Pure parsers from page HTML to records.
 
-Every layout assumption lives in the ANCHORS block below. It is UNVERIFIED against real
-LinkedIn pages until the supervised live step; a missing anchor raises `layout_changed`
-instead of guessing.
+Verified against live pages on 2026-10-03: class names are obfuscated hashes, so parsers rely
+on `<main>`, headings, `aria-label`s, `role`s and link shapes. `data-view-name` markers appear
+on some loads only, so they are never relied on. Every
+such assumption lives in ANCHORS; a missing one raises `layout_changed` instead of guessing.
 """
 
 import re
@@ -21,12 +22,12 @@ from linkedin_bot.adapters.linkedin.models import (
 )
 
 ANCHORS = {
-    "conversations": "Conversations",
-    "search_results": "Search results",
-    "profile": "Profile",
+    "conversation_list": "Conversation List",
     "about": "About",
     "experience": "Experience",
+    "no_results": "no results found",
 }
+PRONOUNS = re.compile(r"^[A-Za-z]+/[A-Za-z]+$")
 VOID = {"br", "img", "input", "meta", "link", "hr"}
 CHALLENGE_PATHS = ("/checkpoint", "/challenge")
 LOGIN_PATHS = ("/login", "/uas/login", "/authwall")
@@ -106,22 +107,52 @@ def rows(container: Node) -> list[Node]:
     return [n for n in container.descendants() if n.tag == "li"]
 
 
+def fragments(node: Node) -> list[str]:
+    """Visible text pieces in document order, with immediate repeats collapsed.
+
+    Result cards repeat the name once for screen readers, so ["Jane", "Jane", ...] becomes
+    ["Jane", ...].
+    """
+    pieces: list[str] = []
+
+    def walk(current: Node) -> None:
+        for child in current.children:
+            if isinstance(child, str):
+                text = re.sub(r"\s+", " ", child).strip()
+                if text and (not pieces or pieces[-1] != text):
+                    pieces.append(text)
+            elif child.tag not in ("script", "style"):
+                walk(child)
+
+    walk(node)
+    return pieces
+
+
+def main_region(html: str) -> Node:
+    return need(parse_html(html).find(lambda n: n.tag == "main"))
+
+
 def parse_messages(html: str) -> Parsed[Conversation]:
-    container = need(labelled(parse_html(html), ANCHORS["conversations"]))
-    items, skipped = [], 0
+    main = main_region(html)
+    container = need(labelled(main, ANCHORS["conversation_list"]))
+    items: list[Conversation] = []
+    skipped = 0
     for row in rows(container):
+        if not row.text():
+            continue  # the list pads itself with empty items
         title = row.find(lambda n: n.tag == "h3")
         snippet = row.find(lambda n: n.tag == "p")
-        identifier = row.attrs.get("data-conversation-id")
-        if not identifier or title is None or not title.text():
+        when = row.find(lambda n: n.tag == "time")
+        if title is None or not title.text():
             skipped += 1
             continue
         items.append(
             Conversation(
-                id=identifier,
+                id=str(len(items)),
                 title=title.text(),
                 snippet=snippet.text() if snippet else "",
-                unread=row.attrs.get("data-unread") == "true",
+                unread="unread" in row.text().lower(),
+                when=when.text() if when else "",
             )
         )
     return Parsed(tuple(items), skipped)
@@ -136,72 +167,101 @@ def canonical(href: str, kind: str) -> str | None:
     return f"https://www.linkedin.com/{kind}/{match.group(1)}"
 
 
-def search_rows(html: str, kind: str) -> tuple[list[tuple[str, Node]], int]:
-    container = need(labelled(parse_html(html), ANCHORS["search_results"]))
-    found, skipped = [], 0
-    for row in rows(container):
-        link = row.find(lambda n: n.tag == "a" and "href" in n.attrs)
-        url = canonical(link.attrs["href"], kind) if link else None
-        if url is None:
+def result_cards(html: str, kind: str) -> tuple[list[tuple[str, Node, Node]], int]:
+    """Cards are `role=listitem` regions holding a /<kind>/ link. Returns (url, link, card)s and
+    the number of listitems with text but no usable link."""
+    main = main_region(html)
+    found: list[tuple[str, Node, Node]] = []
+    skipped = 0
+    for card in (n for n in main.descendants() if n.attrs.get("role") == "listitem"):
+        link = card_link(card, kind)
+        if link is not None:
+            found.append((link[0], link[1], card))
+        elif card.text():
             skipped += 1
-        else:
-            found.append((url, row))
+    if not found and not skipped and ANCHORS["no_results"] not in main.text().lower():
+        raise LinkedInError("layout_changed")
     return found, skipped
 
 
-def field_text(row: Node, name: str) -> str:
-    node = row.find(lambda n: has_class(n, name))
-    return node.text() if node else ""
+def card_link(card: Node, kind: str) -> tuple[str, Node] | None:
+    """The richest matching link: an avatar link and a text link usually share a card."""
+    options = []
+    for link in card.descendants():
+        url = canonical(link.attrs.get("href", ""), kind) if link.tag == "a" else None
+        if url is not None:
+            options.append((len(link.text()), url, link))
+    if not options:
+        return None
+    _, url, link = max(options, key=lambda option: option[0])
+    return url, link
 
 
 def parse_people(html: str) -> Parsed[Person]:
-    found, skipped = search_rows(html, "in")
-    items = []
-    for url, row in found:
-        name = field_text(row, "name")
-        if not name:
+    cards, skipped = result_cards(html, "in")
+    items: list[Person] = []
+    for url, link, _card in cards:
+        pieces = [p for p in fragments(link) if not p.startswith("•")]
+        if not pieces:
             skipped += 1
             continue
         items.append(
             Person(
                 url=url,
-                name=name,
-                headline=field_text(row, "headline"),
-                location=field_text(row, "location") or None,
+                name=pieces[0],
+                headline=pieces[1] if len(pieces) > 1 else "",
+                location=pieces[2] if len(pieces) > 2 else None,
             )
         )
     return Parsed(tuple(items), skipped)
 
 
 def parse_companies(html: str) -> Parsed[Company]:
-    found, skipped = search_rows(html, "company")
-    items = []
-    for url, row in found:
-        name = field_text(row, "name")
-        if not name:
+    cards, skipped = result_cards(html, "company")
+    items: list[Company] = []
+    for url, _link, card in cards:
+        pieces = fragments(card)
+        if not pieces:
             skipped += 1
             continue
-        items.append(Company(url=url, name=name, tagline=field_text(row, "headline")))
+        items.append(Company(url=url, name=pieces[0], tagline=", ".join(pieces[1:3])))
     return Parsed(tuple(items), skipped)
 
 
+def heading_block(main: Node, title: str) -> Node | None:
+    """The smallest ancestor of an h2 titled `title` that holds more than the heading."""
+    heading = main.find(lambda n: n.tag == "h2" and n.text() == title)
+    if heading is None:
+        return None
+    parents = {
+        id(c): n for n in [main, *main.descendants()] for c in n.children if isinstance(c, Node)
+    }
+    block: Node = heading
+    while block.text() == title and id(block) in parents:
+        block = parents[id(block)]
+    return block
+
+
 def parse_profile(html: str, url: str) -> Profile:
-    main = need(labelled(parse_html(html), ANCHORS["profile"]))
-    heading = need(main.find(lambda n: n.tag == "h1"))
-
-    def data(name: str) -> str:
-        node = main.find(lambda n: n.attrs.get("data-field") == name)
-        return node.text() if node else ""
-
-    about = labelled(main, ANCHORS["about"])
-    experience = labelled(main, ANCHORS["experience"])
+    main = main_region(html)
+    name_node = need(main.find(lambda n: n.tag == "h2" and bool(n.text())))
+    pieces = fragments(main)
+    after = pieces[pieces.index(name_node.text()) + 1 :] if name_node.text() in pieces else []
+    plain = [p for p in after if not PRONOUNS.match(p) and not p.startswith("Verify")]
+    headline = plain[0] if plain else ""
+    location = None
+    if "·" in plain:
+        before = plain[: plain.index("·")]
+        location = before[-1] if len(before) > 1 else None
+    about_block = heading_block(main, ANCHORS["about"])
+    experience_block = heading_block(main, ANCHORS["experience"])
     return Profile(
         url=url,
-        name=heading.text(),
-        headline=data("headline"),
-        location=data("location") or None,
-        about=about.text() if about else "",
-        experience=tuple(r.text() for r in rows(experience))[:20] if experience else (),
+        name=name_node.text(),
+        headline=headline,
+        location=location,
+        about=about_block.text().removeprefix(ANCHORS["about"]).strip() if about_block else "",
+        experience=tuple(r.text() for r in rows(experience_block))[:20] if experience_block else (),
     )
 
 

@@ -77,8 +77,8 @@ Then, in Telegram: `/li_status`, `/li_messages [1-10]`, `/li_search people|firms
 `/li_profile [https://www.linkedin.com/in/<name>]`. The connector can only navigate and read;
 a test fails if the package gains any click, type or press call. It stops at the first login or
 verification page and pauses for 6 hours, never solving challenges. Limits: 30 page loads/hour,
-150/day, 4-10 s between loads. Page selectors are **unverified** against real LinkedIn pages
-until the supervised live step (`/li_status` says so). LinkedIn's terms prohibit automated
+150/day, 4-10 s between loads. Page parsers were verified against live LinkedIn pages on 2026-10-03; LinkedIn changes its
+markup often, so a `layout_changed` reply means they need updating (`/li_status` shows the date). LinkedIn's terms prohibit automated
 access, so your account could be restricted; the limits reduce but do not remove that risk.
 Message text is never stored or logged.
 

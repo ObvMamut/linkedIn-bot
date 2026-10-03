@@ -17,7 +17,7 @@ from linkedin_bot.adapters.linkedin.pages import Parsed
 from linkedin_bot.domain.models import now
 from linkedin_bot.storage.linkedin import LinkedInStore
 
-LAYOUT_VERIFIED = False
+LAYOUT_VERIFIED = "2026-10-03"  # last live check of the page parsers; None if unchecked
 LIMIT = 3900
 LOGIN_HINT = "Run `linkedin-bot linkedin login` on the machine and sign in once."
 USAGE = {

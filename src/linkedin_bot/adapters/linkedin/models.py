@@ -23,6 +23,7 @@ class Conversation(Contract):
     title: str
     snippet: str
     unread: bool = False
+    when: str = ""
 
 
 class Person(Contract):
