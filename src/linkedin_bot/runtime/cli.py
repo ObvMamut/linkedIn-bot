@@ -14,7 +14,11 @@ from pydantic import ValidationError
 from linkedin_bot.adapters.ats import ATSSource, Board, Provider
 from linkedin_bot.adapters.browser_probe import browser_smoke
 from linkedin_bot.adapters.linkedin.limits import Limiter
-from linkedin_bot.adapters.linkedin.session import open_connector, open_page, wait_for_login
+from linkedin_bot.adapters.linkedin.session import (
+    manual_login_command,
+    open_connector,
+    system_chromium,
+)
 from linkedin_bot.adapters.ollama import OllamaGenerator, OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
 from linkedin_bot.adapters.telegram import HttpTelegram
@@ -88,10 +92,14 @@ async def probe(args: argparse.Namespace, config: Config) -> int:
 async def linkedin_cli(args: argparse.Namespace, config: Config) -> int:
     executable = config.linkedin.browser_executable
     if args.action == "login":
-        async with open_page(config.root, headless=False, executable=executable) as page:
-            await page.goto("https://www.linkedin.com/login")
-            emit({"instruction": "Sign in in the browser window (10 minutes). Do not close it."})
-            state = await wait_for_login(page)
+        browser = system_chromium(executable)
+        if browser is None:
+            raise BoundaryError("chromium_not_found_set_linkedin_browser_executable")
+        emit({"instruction": "Sign in, then close the browser window. Nothing is automated."})
+        process = await asyncio.create_subprocess_exec(*manual_login_command(browser, config.root))
+        await process.wait()
+        async with open_connector(config.root, Limiter(), executable) as connector:
+            state = await connector.status()
         emit({"session": state})
         return 0 if state == "ready" else 2
     async with open_connector(config.root, Limiter(), executable) as connector:

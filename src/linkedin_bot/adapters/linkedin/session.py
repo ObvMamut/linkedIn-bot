@@ -1,20 +1,14 @@
 """Persistent browser profile owned by this app. Login is done by the user in a visible window."""
 
-import asyncio
 import shutil
-import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page, async_playwright
 
 from linkedin_bot.adapters.linkedin.connector import LinkedInConnector
-from linkedin_bot.adapters.linkedin.connector import Page as ReadablePage
 from linkedin_bot.adapters.linkedin.limits import Limiter
-from linkedin_bot.adapters.linkedin.models import SessionState
-from linkedin_bot.adapters.linkedin.pages import detect_state
 from linkedin_bot.runtime.privacy import private_directory
 
 
@@ -55,23 +49,16 @@ async def open_connector(
         yield LinkedInConnector(page, limiter)
 
 
-async def wait_for_login(
-    page: ReadablePage,
-    *,
-    give_up_after: float = 600.0,
-    interval: float = 3.0,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    clock: Callable[[], float] = time.monotonic,
-) -> SessionState:
-    """Watch, never act: the user signs in and handles any challenge in the visible window."""
-    deadline = clock() + give_up_after
-    state: SessionState = "unavailable"
-    while True:
-        try:
-            html = await page.content()
-            state = detect_state(page.url, html)
-        except PlaywrightError:
-            pass  # the page is mid-navigation; look again
-        if state == "ready" or clock() >= deadline:
-            return state
-        await sleep(interval)
+def manual_login_command(executable: str, root: Path) -> list[str]:
+    """A normal browser with nothing attached. Sign-in providers refuse automated browsers.
+
+    `--password-store=basic` matches what Playwright uses, so the reader can open the cookies.
+    """
+    return [
+        executable,
+        f"--user-data-dir={profile_dir(root)}",
+        "--password-store=basic",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://www.linkedin.com/login",
+    ]
