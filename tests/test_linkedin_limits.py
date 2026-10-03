@@ -53,11 +53,14 @@ def test_daily_budget_survives_hourly_resets():
     assert caught.value.code == "rate_limited"
 
 
-def test_each_load_waits_a_jittered_delay_between_four_and_ten_seconds():
+def test_back_to_back_loads_wait_a_jittered_delay_but_the_first_and_idle_ones_do_not():
     clock = Clock()
-    values = iter([4.0, 10.0])
+    values = iter([4.0, 10.0, 7.0])
     lim = limiter(clock, delay=lambda: next(values))
-    acquire_many(lim, 2)
+    acquire_many(lim, 3)
+    assert clock.slept == [4.0, 10.0]  # the first load of a burst is immediate
+    clock.t += 25  # idle for longer than the quiet gap
+    acquire_many(lim, 1)
     assert clock.slept == [4.0, 10.0]
 
 

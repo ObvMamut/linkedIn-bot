@@ -11,6 +11,7 @@ from linkedin_bot.adapters.linkedin.models import LinkedInError
 
 HOURLY = 30
 DAILY = 150
+QUIET_GAP = 20.0  # loads further apart than this are not part of a burst
 
 
 def default_delay() -> float:
@@ -42,5 +43,7 @@ class Limiter:
         recent = [t for t in self.loads if t > now - 3600]
         if len(recent) >= HOURLY:
             raise LinkedInError("rate_limited", math.ceil(recent[0] + 3600 - now))
+        previous = self.loads[-1] if self.loads else None
         self.loads.append(now)
-        await self.sleep(self.delay())
+        if previous is not None and now - previous < QUIET_GAP:
+            await self.sleep(self.delay())  # pace only back-to-back loads

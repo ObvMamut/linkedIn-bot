@@ -1,7 +1,7 @@
 """Telegram `/li_*` commands. Read-only; replies carry only what the user asked for."""
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
@@ -79,13 +79,23 @@ def skipped(count: int) -> str:
 
 
 class LinkedInCommands:
-    def __init__(self, opener: Opener, store: LinkedInStore) -> None:
+    def __init__(
+        self,
+        opener: Opener,
+        store: LinkedInStore,
+        release: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.opener = opener
         self.store = store
+        self.release = release
 
     async def handle(self, text: str) -> str:
         command, _, rest = text.partition(" ")
         rest = rest.strip()
+        if command == "/li_release":
+            if self.release is not None:
+                await self.release()
+            return "Browser released. You can run `linkedin-bot linkedin login` now."
         try:
             async with self.opener() as connector:
                 reply = await self.run(connector, command, rest)

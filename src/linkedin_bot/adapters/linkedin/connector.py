@@ -1,10 +1,14 @@
 """Read-only LinkedIn connector. It can only navigate and read page content."""
 
 import asyncio
+import logging
 import re
-from typing import Protocol
+import time
+from collections.abc import Awaitable, Callable
+from typing import Protocol, TypeVar
 from urllib.parse import quote, urlsplit
 
+from linkedin_bot.adapters.linkedin.cache import TTLCache
 from linkedin_bot.adapters.linkedin.limits import Limiter
 from linkedin_bot.adapters.linkedin.models import (
     Company,
@@ -24,7 +28,9 @@ from linkedin_bot.adapters.linkedin.pages import (
     parse_profile,
 )
 
+T = TypeVar("T")
 BASE = "https://www.linkedin.com"
+TTL = {"messages": 60.0, "people": 300.0, "companies": 300.0, "profile": 600.0}
 CHALLENGE_COOLDOWN_HOURS = 6
 RATE_LIMIT_COOLDOWN_HOURS = 1
 
@@ -66,16 +72,26 @@ def check_query(query: str) -> str:
 
 
 class LinkedInConnector:
-    def __init__(self, page: Page, limiter: Limiter) -> None:
+    def __init__(self, page: Page, limiter: Limiter, cache: TTLCache | None = None) -> None:
         self.page = page
         self.limiter = limiter
+        self.cache = cache or TTLCache()
         self.lock = asyncio.Lock()  # reads share one page; never interleave navigations
 
     async def load(self, url: str, wait_for: str | None = None) -> tuple[SessionState, str]:
         async with self.lock:
+            started = time.perf_counter()
             await self.limiter.acquire()
+            paced = time.perf_counter()
             await self.page.goto(url, wait_for)
             html = await self.page.content()
+            finished = time.perf_counter()
+            logging.info(
+                "", extra={"event": "linkedin_pacing", "duration_ms": int((paced - started) * 1000)}
+            )
+            logging.info(
+                "", extra={"event": "linkedin_page", "duration_ms": int((finished - paced) * 1000)}
+            )
             if "too many requests" in html.lower():
                 self.limiter.trip(RATE_LIMIT_COOLDOWN_HOURS)
                 raise LinkedInError("rate_limited", RATE_LIMIT_COOLDOWN_HOURS * 3600)
@@ -90,26 +106,53 @@ class LinkedInConnector:
             raise LinkedInError(state)
         return html
 
+    async def cached(
+        self, key: tuple[str, ...], ttl: float, refresh: bool, produce: Callable[[], Awaitable[T]]
+    ) -> T:
+        """Successful results only; errors propagate and are never stored."""
+        if not refresh:
+            hit, value = self.cache.get(key)
+            if hit:
+                return value  # type: ignore[no-any-return]
+        value = await produce()
+        self.cache.set(key, value, ttl)
+        return value
+
     async def status(self) -> SessionState:
-        state, _ = await self.load(f"{BASE}/feed/")
+        state, _ = await self.load(f"{BASE}/feed/", "main")
         return state
 
-    async def messages(self, count: int) -> Parsed[Conversation]:
-        parsed = parse_messages(await self.read(f"{BASE}/messaging/", WAIT["messages"]))
+    async def messages(self, count: int, *, refresh: bool = False) -> Parsed[Conversation]:
+        async def produce() -> Parsed[Conversation]:
+            return parse_messages(await self.read(f"{BASE}/messaging/", WAIT["messages"]))
+
+        parsed = await self.cached(("messages",), TTL["messages"], refresh, produce)
         return Parsed(parsed.items[: max(1, count)], parsed.skipped)
 
-    async def search_people(self, query: str) -> Parsed[Person]:
-        keywords = quote(check_query(query), safe="")
-        url = f"{BASE}/search/results/people/?keywords={keywords}"
-        return parse_people(await self.read(url, WAIT["people"]))
+    async def search_people(self, query: str, *, refresh: bool = False) -> Parsed[Person]:
+        query = check_query(query)
+        url = f"{BASE}/search/results/people/?keywords={quote(query, safe='')}"
 
-    async def search_companies(self, query: str) -> Parsed[Company]:
-        keywords = quote(check_query(query), safe="")
-        url = f"{BASE}/search/results/companies/?keywords={keywords}"
-        return parse_companies(await self.read(url, WAIT["companies"]))
+        async def produce() -> Parsed[Person]:
+            return parse_people(await self.read(url, WAIT["people"]))
 
-    async def profile(self, target: str | None) -> Profile:
+        return await self.cached(("people", query.lower()), TTL["people"], refresh, produce)
+
+    async def search_companies(self, query: str, *, refresh: bool = False) -> Parsed[Company]:
+        query = check_query(query)
+        url = f"{BASE}/search/results/companies/?keywords={quote(query, safe='')}"
+
+        async def produce() -> Parsed[Company]:
+            return parse_companies(await self.read(url, WAIT["companies"]))
+
+        return await self.cached(("companies", query.lower()), TTL["companies"], refresh, produce)
+
+    async def profile(self, target: str | None, *, refresh: bool = False) -> Profile:
         url = f"{BASE}/in/me/" if target is None else validate_target(target)
         if not re.fullmatch(rf"{re.escape(BASE)}/in/[^/]+/?", url):
             raise LinkedInError("invalid_target")
-        return parse_profile(await self.read(url, WAIT["profile"]), url)
+
+        async def produce() -> Profile:
+            return parse_profile(await self.read(url, WAIT["profile"]), url)
+
+        return await self.cached(("profile", url), TTL["profile"], refresh, produce)

@@ -17,6 +17,8 @@ class TelegramConfig(Contract):
 class LinkedInConfig(Contract):
     browser_profile_dir: str | None = None
     browser_executable: str | None = None
+    block_resources: bool = True
+    idle_close_seconds: int = Field(default=600, ge=30)
     jobs_interval_minutes: int = Field(default=360, ge=1)
     inbox_interval_minutes: int = Field(default=30, ge=1)
     requests_interval_minutes: int = Field(default=30, ge=1)

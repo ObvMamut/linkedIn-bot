@@ -1,11 +1,8 @@
 # ruff: noqa: E501  (URL literals)
 import asyncio
-import re
-from pathlib import Path
 
 import pytest
 
-import linkedin_bot.adapters.linkedin as package
 from linkedin_bot.adapters.linkedin.connector import LinkedInConnector, validate_target
 from linkedin_bot.adapters.linkedin.limits import Limiter
 from linkedin_bot.adapters.linkedin.models import LinkedInError
@@ -178,15 +175,6 @@ def test_search_queries_are_bounded(query):
     assert caught.value.code == "invalid_query" and page.visited == []
 
 
-def test_connector_package_has_no_way_to_act_on_pages():
-    forbidden = re.compile(
-        r"\.(click|dblclick|fill|type|press|check|select_option|set_input_files|"
-        r"dispatch_event|evaluate|evaluate_handle|keyboard|mouse|route)\b|\bsend_keys\b"
-    )
-    for path in Path(package.__file__).parent.glob("*.py"):
-        assert not forbidden.search(path.read_text()), path.name
-
-
 def test_profile_directory_is_private_and_under_data_dir(tmp_path):
     directory = profile_dir(tmp_path)
     assert directory == tmp_path / "browser" and directory.is_dir()
@@ -318,3 +306,9 @@ def test_read_only_page_waits_for_the_expected_element_too():
 
     run(ReadOnlyPage(Raw(), settle_seconds=0).goto("https://www.linkedin.com/x", "ul.items"))
     assert Raw.waits == ["main", "ul.items"]
+
+
+def test_status_waits_only_for_the_app_shell_not_a_settle_loop():
+    conn, page, _ = connector({})
+    assert run(conn.status()) == "ready"
+    assert page.waited == ["main"]

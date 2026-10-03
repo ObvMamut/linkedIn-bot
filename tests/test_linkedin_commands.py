@@ -217,3 +217,31 @@ def test_restore_clears_linkedin_state(tmp_path):
     restore_backup(snapshot, tmp_path / "restored")
     state = asyncio.run(_state(tmp_path / "restored"))
     assert state == ("unknown", None)
+
+
+def test_release_command_closes_the_browser_and_is_explained_without_one(tmp_path):
+    released = []
+
+    async def release():
+        released.append(True)
+
+    async def main(scenario):
+        db = Database(tmp_path)
+        try:
+            await db.open()
+
+            @asynccontextmanager
+            async def opener():
+                yield FakeConnector()
+
+            api = FakeAPI()
+            commands = LinkedInCommands(opener, LinkedInStore(db), release=release)
+            bot = Bot(db, api, linkedin=commands)
+            await bot.handle(update(1, f"/start {await TelegramStore(db).begin_pairing(now())}"))
+            await bot.handle(update(2, "/li_release"))
+            return api
+        finally:
+            await db.close()
+
+    api = asyncio.run(main(None))
+    assert released == [True] and "released" in last(api).lower()

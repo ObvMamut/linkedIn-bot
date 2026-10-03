@@ -6,17 +6,23 @@ import os
 import signal
 import sqlite3
 import sys
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from pydantic import ValidationError
 
 from linkedin_bot.adapters.ats import ATSSource, Board, Provider
 from linkedin_bot.adapters.browser_probe import browser_smoke
+from linkedin_bot.adapters.linkedin.connector import LinkedInConnector
 from linkedin_bot.adapters.linkedin.limits import Limiter
 from linkedin_bot.adapters.linkedin.session import (
+    WarmSession,
     manual_login_command,
     open_connector,
+    playwright_launcher,
+    profile_in_use,
     system_chromium,
 )
 from linkedin_bot.adapters.ollama import OllamaGenerator, OllamaProbe
@@ -66,7 +72,7 @@ def parser() -> argparse.ArgumentParser:
     telegram = commands.add_parser("telegram", help="Poll Telegram in the foreground")
     telegram.add_argument("--once", action="store_true", help="Handle one polling batch")
     linkedin = commands.add_parser("linkedin", help="Read-only LinkedIn session tools")
-    linkedin.add_argument("action", choices=("login", "status"))
+    linkedin.add_argument("action", choices=("login", "status", "timing"))
     probe = commands.add_parser("probe", help="Explicit bounded feasibility checks")
     probe.add_argument("target", choices=("ollama", "browser"))
     probe.add_argument("--model", help="Installed model for a synthetic probe; never downloads")
@@ -89,8 +95,52 @@ async def probe(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+async def timing(config: Config) -> int:
+    """Per-step wall time and result counts only (never content), cold then warm then cached.
+
+    Burst pacing is switched off here: a lone command after a quiet period has none, so this
+    shows what one command costs. Hourly and daily limits still apply.
+    """
+    session = WarmSession(
+        playwright_launcher(
+            config.root, config.linkedin.browser_executable, config.linkedin.block_resources
+        ),
+        Limiter(delay=lambda: 0.0),
+    )
+    steps: list[tuple[str, Callable[[LinkedInConnector], Awaitable[Any]]]] = [
+        ("status", lambda c: c.status()),
+        ("messages", lambda c: c.messages(5, refresh=True)),
+        ("people", lambda c: c.search_people("data scientist", refresh=True)),
+        ("firms", lambda c: c.search_companies("palantir", refresh=True)),
+        ("profile", lambda c: c.profile(None, refresh=True)),
+    ]
+    rows = []
+    try:
+        for label, refresh in (("cold", True), ("warm", True), ("cached", False)):
+            for name, call in steps if refresh else [("messages", lambda c: c.messages(5))]:
+                started = time.perf_counter()
+                async with session.use() as connector:
+                    result = await call(connector)
+                rows.append(
+                    {
+                        "run": label,
+                        "step": name,
+                        "ms": int((time.perf_counter() - started) * 1000),
+                        "items": len(getattr(result, "items", ())) or None,
+                    }
+                )
+    finally:
+        await session.close()
+    emit(rows)
+    return 0
+
+
 async def linkedin_cli(args: argparse.Namespace, config: Config) -> int:
     executable = config.linkedin.browser_executable
+    if profile_in_use(config.root):
+        raise BoundaryError("browser_in_use_send_li_release_in_telegram_or_stop_the_bot")
+    if args.action == "timing":
+        return await timing(config)
     if args.action == "login":
         browser = system_chromium(executable)
         if browser is None:
@@ -242,10 +292,14 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
     generator = OllamaGenerator(config.inference) if config.inference.model else None
     # No effect adapter is registered, so approved actions stay blocked until one is added.
     limiter = Limiter()  # shared, so the page budget holds across Telegram commands
-    commands = LinkedInCommands(
-        lambda: open_connector(config.root, limiter, config.linkedin.browser_executable),
-        LinkedInStore(database),
+    session = WarmSession(
+        playwright_launcher(
+            config.root, config.linkedin.browser_executable, config.linkedin.block_resources
+        ),
+        limiter,
+        idle_seconds=config.linkedin.idle_close_seconds,
     )
+    commands = LinkedInCommands(session.use, LinkedInStore(database), release=session.close)
     bot = Bot(database, api, generator, Executor(database, timezone=config.timezone), commands)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -266,6 +320,7 @@ async def telegram_foreground(database: Database, config: Config, *, once: bool)
             if once:
                 break
     finally:
+        await session.close()
         await api.close()
         if generator is not None:
             await generator.close()

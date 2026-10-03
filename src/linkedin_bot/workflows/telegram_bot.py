@@ -40,6 +40,7 @@ HELP = (
     "/policy show or change mode and daily caps (changes need 'confirm')\n"
     "/resolve <action> success|none <note> record what you saw for an unknown outcome\n"
     "/li_status /li_messages /li_search /li_profile read-only LinkedIn access\n"
+    "/li_release free the browser profile (before `linkedin login`)\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
 )
 
