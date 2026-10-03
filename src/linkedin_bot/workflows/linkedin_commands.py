@@ -105,7 +105,9 @@ class LinkedInCommands:
             state = await connector.status()
             note = "" if state == "ready" else f"\n{LOGIN_HINT}"
             layout = (
-                "verified" if LAYOUT_VERIFIED else "layout unverified (selectors not yet checked)"
+                f"verified against live pages on {LAYOUT_VERIFIED}"
+                if LAYOUT_VERIFIED
+                else "unverified (not yet checked)"
             )
             return f"LinkedIn session: {state}.\nPage layout: {layout}.{note}"
         if command == "/li_messages":
