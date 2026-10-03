@@ -229,6 +229,32 @@ class Database:
         )
         return SearchPreferences.model_validate_json(row[0])
 
+    async def update_preferences(
+        self, change: Callable[[SearchPreferences], SearchPreferences]
+    ) -> SearchPreferences:
+        """Read, change and save as the next revision in one transaction (no lost updates)."""
+
+        def write(connection: sqlite3.Connection) -> SearchPreferences:
+            with transaction(connection):
+                latest, snapshot = connection.execute(
+                    "SELECT revision,snapshot FROM preferences ORDER BY revision DESC LIMIT 1"
+                ).fetchone()
+                current = SearchPreferences.model_validate_json(snapshot)
+                updated = change(current).model_copy(update={"revision": latest + 1})
+                updated = SearchPreferences.model_validate_json(updated.model_dump_json())
+                connection.execute(
+                    "INSERT INTO preferences VALUES (?,?)",
+                    (updated.revision, updated.model_dump_json()),
+                )
+                connection.execute(
+                    "UPDATE actions SET state='blocked',reason_code='stale_preferences' "
+                    "WHERE state IN ('proposed','ready','awaiting_approval')"
+                )
+                connection.execute("UPDATE approvals SET invalidated=1 WHERE consumed_at IS NULL")
+                return updated
+
+        return await self.call(write)
+
     async def save_preferences(
         self, preferences: SearchPreferences, expected_revision: int
     ) -> None:
