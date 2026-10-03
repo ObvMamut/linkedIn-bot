@@ -26,7 +26,6 @@ ANCHORS = {
     "profile": "Profile",
     "about": "About",
     "experience": "Experience",
-    "signed_in_nav": "Primary navigation",
 }
 VOID = {"br", "img", "input", "meta", "link", "hr"}
 CHALLENGE_PATHS = ("/checkpoint", "/challenge")
@@ -214,6 +213,9 @@ def detect_state(url: str, html: str) -> SessionState:
         return "auth_required"
     if "unusual activity" in html.lower():
         return "challenge_required"
-    if labelled(parse_html(html), ANCHORS["signed_in_nav"]) is not None:
-        return "ready"
-    return "unavailable"
+    root = parse_html(html)
+    if root.find(lambda n: n.tag == "input" and n.attrs.get("type") == "password"):
+        return "auth_required"
+    # Class names are obfuscated hashes; a signed-in page is recognised by its <main> region
+    # on a URL that did not bounce to login (logged-out visits redirect there).
+    return "ready" if root.find(lambda n: n.tag == "main") is not None else "unavailable"

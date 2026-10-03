@@ -38,7 +38,7 @@ PROFILE = """
  <section aria-label="Experience"><ul>
   <li>Acme, 2022-2024</li><li>Beta, 2020-2022</li></ul></section>
 </main>"""
-SIGNED_IN = '<nav aria-label="Primary navigation"></nav><main></main>'
+SIGNED_IN = '<header></header><main id="workspace"><p>feed</p></main>'
 
 
 def test_messages_parse_rows_and_count_skipped():
@@ -96,6 +96,11 @@ def test_missing_anchor_is_layout_changed(parse):
             "challenge_required",
         ),
         ("https://www.linkedin.com/feed/", "<p>nothing</p>", "unavailable"),
+        (
+            "https://www.linkedin.com/feed/",
+            '<main><form><input type="password"></form></main>',
+            "auth_required",
+        ),
     ],
 )
 def test_detect_state(url, html, expected):
