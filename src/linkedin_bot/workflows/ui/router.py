@@ -1,22 +1,16 @@
-"""Button presses and pending text input. Everything the user can tap goes through here."""
+"""Button presses and pending text input. Everything the user can tap goes through here.
+
+This module renders and routes; reading and changing state lives in `workflows.operations`.
+"""
 
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
-from linkedin_bot.adapters.ats import Board
 from linkedin_bot.adapters.linkedin.pages import Parsed
 from linkedin_bot.adapters.telegram import TelegramAPI
-from linkedin_bot.domain.matching import rank
-from linkedin_bot.domain.models import (
-    DEFAULT_PRIORITIES,
-    SearchPreferences,
-    SourceObservation,
-    digest,
-    now,
-)
+from linkedin_bot.domain.models import SearchPreferences
 from linkedin_bot.domain.workspace import Pin
 from linkedin_bot.runtime.privacy import BoundaryError
 from linkedin_bot.storage.database import Database
@@ -24,15 +18,23 @@ from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.workspace import WorkspaceStore
 from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.linkedin_commands import Connector, LinkedInCommands
-from linkedin_bot.workflows.searching import split_job_query
+from linkedin_bot.workflows.operations import (
+    BoardFinder,
+    Operations,
+    SearchKind,
+    job_item,
+    search_kind,
+    split_items,
+)
 from linkedin_bot.workflows.ui import screens
 from linkedin_bot.workflows.ui.keyboard import Button, Screen, to_markup
 from linkedin_bot.workflows.ui.screens import LIST_FIELDS, LOADING, pin_key
 from linkedin_bot.workflows.ui.tokens import TokenMap
 
-BoardFinder = Callable[[str], Awaitable[tuple[str, str] | None]]
+__all__ = ["BOARD_INTERVAL_SECONDS", "UI", "BoardFinder", "Ctx", "split_items"]
+
 SEARCH_KINDS = ("people", "firms")  # kinds whose results can be pinned
-ALL_KINDS = ("people", "firms", "jobs")
+ALL_KINDS: tuple[SearchKind, ...] = ("people", "firms", "jobs")
 EXPIRED = "This button expired. Open it again from the menu."
 FIELD_AREA = {
     "locations": "loc",
@@ -55,11 +57,6 @@ class Ctx:
     answered: bool = False
 
 
-def split_items(text: str) -> list[str]:
-    parts = [part.strip() for part in text.replace("\n", ",").split(",")]
-    return [part for part in parts if 0 < len(part) <= 60][:20]
-
-
 class UI:
     def __init__(
         self,
@@ -70,11 +67,14 @@ class UI:
         llm_enabled: bool = False,
         digest_service: DigestService | None = None,
         board_interval_seconds: int = BOARD_INTERVAL_SECONDS,
+        operations: Operations | None = None,
     ) -> None:
         self.db, self.api, self.linkedin, self.finder = database, api, linkedin, board_finder
         self.llm_enabled = llm_enabled
-        self.board_interval_seconds = board_interval_seconds
         self.digest_service = digest_service
+        self.ops = operations or Operations(
+            database, linkedin, board_finder, board_interval_seconds
+        )
         self.store = WorkspaceStore(database)
         self.linked = LinkedInStore(database)
         self.tokens = TokenMap()
@@ -142,15 +142,10 @@ class UI:
         self, ctx: Ctx, call: Callable[[Connector], Awaitable[Any]]
     ) -> tuple[Any, str | None]:
         await self.loading(ctx)
-        if self.linkedin is None:
-            return None, "LinkedIn is not enabled on this installation."
-        return await self.linkedin.fetch(call)
+        return await self.ops.fetch(call)
 
     async def preferences(self) -> SearchPreferences:
-        return await self.db.preferences()
-
-    async def edit_prefs(self, change: Callable[[SearchPreferences], SearchPreferences]) -> None:
-        await self.db.update_preferences(change)
+        return await self.ops.preferences()
 
     # ---- dispatch ---------------------------------------------------------------------
     async def dispatch(self, ctx: Ctx, data: str) -> str | None:  # noqa: C901
@@ -204,7 +199,8 @@ class UI:
 
     # ---- messages, status, jobs ---------------------------------------------------------
     async def messages(self, ctx: Ctx, *, refresh: bool) -> None:
-        result, error = await self.fetch(ctx, lambda c: c.messages(10, refresh=refresh))
+        await self.loading(ctx)
+        result, error = await self.ops.messages(refresh=refresh)
         if error is not None:
             await self.show(ctx, screens.error_screen(error))
             return
@@ -232,8 +228,7 @@ class UI:
         )
 
     async def jobs(self, ctx: Ctx) -> None:
-        recent = await self.db.opportunities(since=now() - timedelta(days=60))
-        matches = rank(recent, await self.preferences(), await self.store.pinned_tokens())
+        matches = await self.ops.job_matches()
         if not matches:
             await self.show(
                 ctx,
@@ -243,19 +238,7 @@ class UI:
                 ),
             )
             return
-        items = [
-            {
-                "title": f"💼 {m.title}",
-                "lines": [
-                    f"{m.company or m.source} · {m.location or 'location unknown'}",
-                    f"score {m.score} — {', '.join(m.reasons)}",
-                    f"Gaps: {', '.join(m.gaps)}" if m.gaps else "",
-                ],
-                "url": m.url,
-                "key": m.url,
-            }
-            for m in matches[:30]
-        ]
+        items = [job_item(m).card() for m in matches[:30]]
         await self.show_results(ctx, "jobs", "", items, header="💼 Best matches for your settings")
 
     # ---- search and results -------------------------------------------------------------
@@ -294,98 +277,16 @@ class UI:
         await self.show(ctx, self.render_card(payload, token, int(index)))
         return None
 
-    def cards(self, kind: str, parsed: Parsed[Any]) -> list[dict[str, Any]]:
-        if kind == "people":
-            return [
-                {
-                    "title": f"👤 {p.name}",
-                    "lines": [p.headline, p.location or ""],
-                    "url": p.url,
-                    "key": p.url,
-                    "name": p.name,
-                }
-                for p in parsed.items
-            ]
-        return [
-            {
-                "title": f"🏢 {c.name}",
-                "lines": [c.tagline],
-                "url": c.url,
-                "key": c.url,
-                "name": c.name,
-            }
-            for c in parsed.items
-        ]
-
     async def search(
-        self, ctx: Ctx, kind: str, query: str, *, refresh: bool = False
+        self, ctx: Ctx, kind: SearchKind, query: str, *, refresh: bool = False
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
-        if kind == "jobs":
-            words, place = split_job_query(query)
-            result, error = await self.fetch(
-                ctx, lambda c: c.search_jobs(words, place, refresh=refresh)
-            )
-            if error is not None:
-                return None, error
-            return await self.job_cards(result), None
-        if kind == "people":
-            result, error = await self.fetch(ctx, lambda c: c.search_people(query, refresh=refresh))
-        else:
-            result, error = await self.fetch(
-                ctx, lambda c: c.search_companies(query, refresh=refresh)
-            )
-        if error is not None:
+        await self.loading(ctx)
+        items, error = await self.ops.search(kind, query, refresh=refresh)
+        if error is not None or items is None:
             return None, error
-        return self.cards(kind, result), None
+        return [item.card() for item in items], None
 
-    async def job_cards(self, parsed: Parsed[Any]) -> list[dict[str, Any]]:
-        """Store the public postings, then order them by your settings (best fit first)."""
-        stamp = now()
-        observations = [
-            SourceObservation(
-                source="linkedin",
-                external_id=job.id,
-                url=job.url,
-                title=job.title,
-                location=job.location,
-                company=job.company,
-                content_hash=digest(f"{job.id}|{job.title}|{job.company}|{job.location}".encode()),
-                observed_at=stamp,
-            )
-            for job in parsed.items
-        ]
-        await self.db.save_observations(observations)
-        matches = rank(observations, await self.preferences(), await self.store.pinned_tokens())
-        matched = {m.external_id for m in matches}
-        cards = [
-            {
-                "title": f"💼 {m.title}",
-                "lines": [
-                    f"{m.company} · {m.location or 'location unknown'}",
-                    f"score {m.score} — {', '.join(m.reasons)}",
-                    f"Gaps: {', '.join(m.gaps)}" if m.gaps else "",
-                ],
-                "url": m.url,
-                "key": m.url,
-            }
-            for m in matches
-        ]
-        cards += [
-            {
-                "title": f"💼 {o.title}",
-                "lines": [
-                    f"{o.company} · {o.location or 'location unknown'}",
-                    "outside your settings",
-                ],
-                "url": o.url,
-                "key": o.url,
-            }
-            for o in observations
-            if o.external_id not in matched
-        ]
-        return cards
-
-    async def run_search(self, ctx: Ctx, kind: str, query: str) -> None:
+    async def run_search(self, ctx: Ctx, kind: SearchKind, query: str) -> None:
         items, error = await self.search(ctx, kind, query)
         if error is not None or items is None:
             await self.show(ctx, screens.error_screen(error or "Search failed.", "m:search"))
@@ -397,27 +298,24 @@ class UI:
             await self.show_results(ctx, kind, query, items, header=f"🔎 {kind}: {query}")
 
     async def run_saved(self, ctx: Ctx, saved_id: str) -> None:
-        saved = next((s for s in await self.store.saved() if s.id == saved_id), None)
-        if saved is None:
-            await self.show(
-                ctx, screens.error_screen("That saved search no longer exists.", "m:saved")
-            )
+        if await self.ops.saved(saved_id) is not None:
+            await self.loading(ctx)
+        run = await self.ops.run_saved(saved_id)
+        if run.saved is None:
+            await self.show(ctx, screens.error_screen(run.error or "", "m:saved"))
             return
-        items, error = await self.search(ctx, saved.kind, saved.query, refresh=True)
-        if error is not None or items is None:
-            await self.show(ctx, screens.error_screen(error or "Search failed.", "m:saved"))
+        if run.error is not None:
+            await self.show(ctx, screens.error_screen(run.error, "m:saved"))
             return
-        fresh = set(await self.store.record_run(saved_id, [item["key"] for item in items]))
-        new_items = [item for item in items if item["key"] in fresh]
-        if not new_items:
-            await self.show(ctx, screens.no_new_screen(saved.name, saved_id))
+        if not run.new_items:
+            await self.show(ctx, screens.no_new_screen(run.saved.name, saved_id))
             return
         await self.show_results(
             ctx,
-            saved.kind,
-            saved.query,
-            new_items,
-            header=f"💾 {saved.name} — {len(new_items)} new",
+            run.saved.kind,
+            run.saved.query,
+            [item.card() for item in run.new_items],
+            header=f"💾 {run.saved.name} — {len(run.new_items)} new",
             saved_id=saved_id,
         )
 
@@ -436,10 +334,11 @@ class UI:
         payload = self.tokens.get(token)
         if payload is None:
             return EXPIRED
-        saved_id = await self.store.save_search(
-            payload["kind"], payload["query"], f"{payload['kind']}: {payload['query']}"
+        if not payload["query"]:
+            return "These results have no search words to save."
+        await self.ops.save_search(
+            payload["kind"], payload["query"], [item["key"] for item in payload["items"]]
         )
-        await self.store.record_run(saved_id, [item["key"] for item in payload["items"]])
         return "Saved. Rerun it from 💾 Saved to see only new results."
 
     # ---- pins ---------------------------------------------------------------------------
@@ -470,19 +369,14 @@ class UI:
         return None
 
     async def link_board(self, ctx: Ctx, pin: Pin) -> str | None:
-        if self.finder is None:
+        if self.ops.finder is None:
             return "Job-board lookup is not configured."
         await self.loading(ctx, "🔎 Looking for a public job board…")
-        found = await self.finder(pin.name)
+        found = await self.ops.link_board(pin)
         if found is None:
             await self.show(ctx, screens.pin_detail(pin))
             return "No public Greenhouse, Lever or Ashby board found."
         provider, slug = found
-        await self.store.link_board(pin.url, provider, slug)
-        board = Board.model_validate({"provider": provider, "slug": slug})
-        await self.db.schedule(
-            f"ats:{provider}:{slug}", board.model_dump_json(), now(), self.board_interval_seconds
-        )
         updated = await self.pin_by_key(pin_key(pin.url))
         await self.show(ctx, screens.pin_detail(updated or pin))
         return f"Linked {provider}/{slug}. Openings are collected when the bot runs (serve)."
@@ -520,16 +414,10 @@ class UI:
         ):
             await self.show(ctx, await self.settings_screen(area))
         elif area == "remote":
-            await self.edit_prefs(
-                lambda p: p.model_copy(
-                    update={"remote": {None: True, True: False, False: None}[p.remote]}
-                )
-            )
+            await self.ops.cycle_remote()
             await self.show(ctx, await self.settings_screen("loc"))
         elif area == "intern":
-            await self.edit_prefs(
-                lambda p: p.model_copy(update={"internship": None if p.internship else True})
-            )
+            await self.ops.toggle_internship()
             await self.show(ctx, await self.settings_screen("loc"))
         elif area == "add" and len(parts) == 2 and parts[1] in LIST_FIELDS:
             await self.store.set_awaiting(f"add:{parts[1]}", {"msg": ctx.message_id})
@@ -539,17 +427,16 @@ class UI:
                 screens.prompt(f"Send the {label}(s) to add, separated by commas or new lines."),
             )
         elif area == "del" and len(parts) == 3 and parts[1] in LIST_FIELDS and parts[2].isdecimal():
-            await self.edit_list(parts[1], delete=int(parts[2]))
+            await self.ops.edit_list(parts[1], delete=int(parts[2]))
             await self.show(ctx, await self.settings_screen(FIELD_AREA[parts[1]]))
         elif area == "lang" and len(parts) == 2 and parts[1] in screens.LANGUAGES:
-            await self.toggle_language(parts[1])
+            await self.ops.toggle_language(parts[1])
             await self.show(ctx, await self.settings_screen("lang"))
         elif area == "age" and len(parts) == 2 and parts[1] in screens.AGE_PRESETS:
-            days = None if parts[1] == "any" else int(parts[1])
-            await self.edit_prefs(lambda p: p.model_copy(update={"max_age_days": days}))
+            await self.ops.set_max_age(None if parts[1] == "any" else int(parts[1]))
             await self.show(ctx, await self.settings_screen("lang"))
         elif area == "prio" and len(parts) == 3:
-            await self.change_priority(parts[1], parts[2])
+            await self.ops.change_priority(parts[1], parts[2])
             await self.show(ctx, await self.settings_screen("prio"))
         elif area == "interests" and parts[1:] == ["edit"]:
             await self.store.set_awaiting("interests", {"msg": ctx.message_id})
@@ -560,49 +447,6 @@ class UI:
         else:
             return "Unknown button."
         return None
-
-    async def edit_list(
-        self, field: str, *, add: list[str] | None = None, delete: int | None = None
-    ) -> None:
-        def change(p: SearchPreferences) -> SearchPreferences:
-            values = list(getattr(p, field))
-            if delete is not None and 0 <= delete < len(values):
-                values.pop(delete)
-            lowered = {value.lower() for value in values}
-            for item in add or []:
-                if item.lower() not in lowered:
-                    values.append(item)
-                    lowered.add(item.lower())
-            return p.model_copy(update={field: tuple(values)})
-
-        await self.edit_prefs(change)
-
-    async def toggle_language(self, code: str) -> None:
-        def change(p: SearchPreferences) -> SearchPreferences:
-            chosen = list(p.languages)
-            chosen.remove(code) if code in chosen else chosen.append(code)
-            return p.model_copy(update={"languages": tuple(chosen)})
-
-        await self.edit_prefs(change)
-
-    async def change_priority(self, operation: str, name: str) -> None:
-        if name not in DEFAULT_PRIORITIES:
-            raise ValueError("unknown_priority")
-
-        def change(p: SearchPreferences) -> SearchPreferences:
-            order = list(p.priorities)
-            if operation == "add" and name not in order:
-                order.append(name)
-            elif operation == "rm" and name in order and len(order) > 1:
-                order.remove(name)
-            elif operation in ("up", "dn") and name in order:
-                index = order.index(name)
-                target = index - 1 if operation == "up" else index + 1
-                if 0 <= target < len(order):
-                    order[index], order[target] = order[target], order[index]
-            return p.model_copy(update={"priorities": tuple(order)})
-
-        await self.edit_prefs(change)
 
     async def digest(self, ctx: Ctx, rest: str) -> None:
         current = await self.store.digest()
@@ -639,16 +483,17 @@ class UI:
     # ---- pending text input -------------------------------------------------------------
     async def consume(self, ctx: Ctx, name: str, text: str) -> None:
         kind, _, arg = name.partition(":")
-        if kind == "search" and arg in ALL_KINDS:
+        chosen = search_kind(arg)
+        if kind == "search" and chosen is not None:
             if not 1 <= len(text) <= 100:
                 await self.show(
                     ctx,
                     screens.error_screen("Give search words of 1 to 100 characters.", "m:search"),
                 )
                 return
-            await self.run_search(ctx, arg, text)
+            await self.run_search(ctx, chosen, text)
         elif kind == "add" and arg in LIST_FIELDS:
-            await self.edit_list(arg, add=split_items(text))
+            await self.ops.edit_list(arg, add=split_items(text))
             await self.show(ctx, await self.settings_screen(FIELD_AREA[arg]))
         elif kind in ("note", "tags"):
             pin = await self.pin_by_key(arg)
@@ -665,7 +510,7 @@ class UI:
                 else screens.pins_screen(await self.store.pins()),
             )
         elif kind == "interests":
-            await self.edit_prefs(lambda p: p.model_copy(update={"interests": text[:2000]}))
+            await self.ops.set_interests(text)
             await self.show(ctx, await self.settings_screen("interests"))
         else:
             await self.show(ctx, screens.main_menu())

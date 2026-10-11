@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx
 
@@ -18,11 +18,6 @@ from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
     MAX_DAILY_APPLICATIONS,
     MAX_DAILY_COMMUNICATIONS,
-    Artifact,
-    CandidateFact,
-    SearchPreferences,
-    digest,
-    identifier,
     now,
 )
 from linkedin_bot.runtime.privacy import BoundaryError
@@ -32,16 +27,10 @@ from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
+from linkedin_bot.workflows.onboarding import PROMPTS, Onboarding
+from linkedin_bot.workflows.operations import Operations
 from linkedin_bot.workflows.ui.router import BOARD_INTERVAL_SECONDS, UI, BoardFinder
 
-STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
-PROMPTS = {
-    "roles": "Which roles or internships are you targeting? (comma separated)",
-    "locations": "Which locations, and is remote acceptable? Say 'remote ok' if it is.",
-    "exclusions": "Any companies, sectors or role types to exclude? (comma separated, or 'none')",
-    "eligibility": "What is your work eligibility (citizenship, visa needs)? I will not guess it.",
-    "cv": "Paste your CV as text. I never ask for LinkedIn passwords, codes or cookies here.",
-}
 MODE_LINE = "Mode: draft_only. Nothing is sent to employers; application and message caps are 0."
 HELP = (
     "/start resume onboarding\n/status show mode and progress\n"
@@ -58,10 +47,6 @@ HELP = (
 )
 
 
-def split(text: str) -> tuple[str, ...]:
-    return tuple(part.strip() for part in text.replace("\n", ",").split(",") if part.strip())
-
-
 class Bot:
     def __init__(
         self,
@@ -72,6 +57,9 @@ class Bot:
         linkedin: LinkedInCommands | None = None,
         board_finder: BoardFinder | None = None,
         board_interval_seconds: int = BOARD_INTERVAL_SECONDS,
+        *,
+        operations: Operations | None = None,
+        digest_service: DigestService | None = None,
     ) -> None:
         self.db = database
         self.api = api
@@ -79,14 +67,16 @@ class Bot:
         self.executor = executor or Executor(database)
         self.linkedin = linkedin
         self.store = TelegramStore(database)
+        self.onboarding = Onboarding(database)
         self.ui = UI(
             database,
             api,
             linkedin,
             board_finder,
             llm_enabled=generator is not None,
-            digest_service=DigestService(database, linkedin, generator),
+            digest_service=digest_service or DigestService(database, linkedin, generator),
             board_interval_seconds=board_interval_seconds,
+            operations=operations,
         )
 
     async def handle(self, update: Update) -> None:
@@ -306,79 +296,19 @@ class Bot:
         return "Recorded as your attestation." if done else "No unknown action with that id."
 
     async def _prompt(self) -> str:
-        step, _ = await self.store.onboarding()
-        return "Onboarding is complete. Use /status or /help." if step == "done" else PROMPTS[step]
+        return await self.onboarding.prompt()
 
     async def _answer(self, chat_id: int, text: str) -> None:
-        step, answers = await self.store.onboarding()
-        if step == "done":
+        if await self.onboarding.done():
             await self._reply(chat_id, "Onboarding is complete. Use /help.")
             return
-        answers[step] = text
-        following = STEPS[STEPS.index(step) + 1] if step != STEPS[-1] else "done"
-        if following == "done":
-            await self._finish(answers, now())
-            # The CV now lives in its own checked artifact; keep no second copy here.
-            answers = {key: value for key, value in answers.items() if key != "cv"}
-        await self.store.set_onboarding(following, answers)
+        following = await self.onboarding.answer(text, now())
         await self._reply(
             chat_id,
             "Saved. Onboarding is complete; I will not act until later milestones release it."
             if following == "done"
             else f"Saved. {PROMPTS[following]}",
         )
-
-    async def _finish(self, answers: dict[str, str], at: datetime) -> None:
-        remote = "remote" in answers["locations"].lower() or None
-        places = tuple(
-            p for p in split(answers["locations"]) if p.lower() not in ("remote ok", "remote")
-        )
-        roles = split(answers["roles"])
-        exclusions = () if answers["exclusions"].lower() == "none" else split(answers["exclusions"])
-
-        def merge(current: SearchPreferences) -> SearchPreferences:
-            # Settings changed from /menu before onboarding ended are kept; answers add to them.
-            def union(old: tuple[str, ...], new: tuple[str, ...]) -> tuple[str, ...]:
-                seen = {value.lower() for value in old}
-                return old + tuple(value for value in new if value.lower() not in seen)
-
-            return current.model_copy(
-                update={
-                    "roles": union(current.roles, roles),
-                    "locations": union(current.locations, places),
-                    "remote": current.remote if remote is None else remote,
-                    "internship": current.internship
-                    or any("intern" in role.lower() for role in roles)
-                    or None,
-                    "exclusions": union(current.exclusions, exclusions),
-                }
-            )
-
-        await self.db.update_preferences(merge)
-        await self.db.save_fact(
-            CandidateFact(
-                kind="work_eligibility",
-                value=answers["eligibility"],
-                source_reference="telegram:onboarding",
-                status="confirmed",
-                confirmed_at=at,
-            )
-        )
-        content = answers["cv"].encode()
-        artifact_id = identifier()
-        profile = await self.db.profile()
-        await self.db.save_artifact(
-            content,
-            Artifact(
-                id=artifact_id,
-                kind="baseline_cv",
-                relative_path=f"artifacts/{artifact_id}",
-                sha256=digest(content),
-                profile_revision=profile.revision,
-                generator_version="user-supplied",
-            ),
-        )
-        logging.info("", extra={"event": "onboarding_completed"})
 
     async def _reply(self, chat_id: int, text: str) -> None:
         await self.api.send_message(chat_id, text)

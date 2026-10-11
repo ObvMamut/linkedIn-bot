@@ -25,24 +25,21 @@ from linkedin_bot.adapters.linkedin.session import (
     profile_in_use,
     system_chromium,
 )
-from linkedin_bot.adapters.ollama import OllamaGenerator, OllamaProbe
+from linkedin_bot.adapters.ollama import OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
-from linkedin_bot.adapters.telegram import TOKEN_ENV, HttpTelegram
+from linkedin_bot.adapters.telegram import TOKEN_ENV
 from linkedin_bot.domain.models import identifier, now
 from linkedin_bot.runtime.config import Config, load_config
 from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
 from linkedin_bot.runtime.privacy import BoundaryError, configure_logging
+from linkedin_bot.runtime.services import Services
 from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError
 from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.storage.workspace import WorkspaceStore
-from linkedin_bot.workflows.boards import find_board, public_probe
-from linkedin_bot.workflows.executor import Executor
-from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.monitor import run_one
-from linkedin_bot.workflows.serve import Scheduler, monitor_loop, run_scheduler
-from linkedin_bot.workflows.telegram_bot import Bot, poll_forever
+from linkedin_bot.workflows.telegram_bot import poll_forever
 
 
 def emit(content: object) -> None:
@@ -327,66 +324,24 @@ async def foreground(database: Database, *, once: bool) -> None:
 async def telegram_foreground(
     database: Database, config: Config, *, once: bool, background: bool = False
 ) -> None:
-    api = HttpTelegram()
-    generator = OllamaGenerator(config.inference) if config.inference.model else None
     # No effect adapter is registered, so approved actions stay blocked until one is added.
-    # Shared and persisted, so the page budget and cooldowns hold across commands and restarts.
-    limiter = Limiter(budget=BudgetFile(config.root))
-    session = WarmSession(
-        playwright_launcher(
-            config.root, config.linkedin.browser_executable, config.linkedin.block_resources
-        ),
-        limiter,
-        idle_seconds=config.linkedin.idle_close_seconds,
-    )
-    commands = LinkedInCommands(session.use, LinkedInStore(database), release=session.close)
-    http = PublicHTTP()
-
-    async def board_finder(name: str) -> tuple[str, str] | None:
-        return await find_board(name, public_probe(http))
-
-    bot = Bot(
-        database,
-        api,
-        generator,
-        Executor(database, timezone=config.timezone),
-        commands,
-        board_finder,
-        board_interval_seconds=config.board_interval_seconds,
-    )
+    services = Services.from_config(config, database, telegram=True)
+    assert services.bot is not None and services.api is not None
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
-    background_tasks: list[asyncio.Task[None]] = []
     try:
-        if not await bot.store.polling_allowed(now()):
+        if not await services.bot.store.polling_allowed(now()):
             raise BoundaryError("not_paired_run_pair_first")
         if background:
-            # Opt-in work: board collection every time something is due, plus the digest and
-            # alerts (which do nothing until switched on in Settings).
-            assert bot.ui.digest_service is not None
-            scheduler = Scheduler(
-                db=database,
-                api=api,
-                digest=bot.ui.digest_service,
-                linkedin=commands,
-                timezone=config.timezone,
-                message_interval_minutes=max(30, config.linkedin.inbox_interval_minutes),
-            )
-            background_tasks = [
-                asyncio.create_task(monitor_loop(lambda: run_one(database, http), stop)),
-                asyncio.create_task(run_scheduler(scheduler, stop)),
-            ]
-        await poll_forever(bot, api, stop, once=once)
+            # Opt-in work: board collection every time something is due, plus the digest,
+            # alerts and daily upkeep (which do nothing until switched on in Settings).
+            services.start_background(stop)
+        await poll_forever(services.bot, services.api, stop, once=once)
     finally:
         stop.set()
-        await asyncio.gather(*background_tasks, return_exceptions=True)
-        await session.close()
-        await http.close()
-        await api.close()
-        if generator is not None:
-            await generator.close()
+        await services.aclose()
         for signum in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(signum)
 

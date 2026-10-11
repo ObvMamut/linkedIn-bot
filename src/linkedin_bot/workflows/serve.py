@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -34,32 +34,66 @@ class Ticker(Protocol):
     async def tick(self) -> list[str]: ...
 
 
+class Notifier(Protocol):
+    """Somewhere a digest or an alert can be delivered (Telegram, the terminal UI)."""
+
+    async def ready(self) -> bool: ...
+
+    async def send(self, text: str, kind: str) -> None: ...
+
+
+class TelegramNotifier:
+    """Delivers to the paired private chat; silent while unpaired."""
+
+    def __init__(self, api: TelegramAPI, store: TelegramStore) -> None:
+        self.api, self.store = api, store
+
+    async def ready(self) -> bool:
+        return await self.store.binding() is not None
+
+    async def send(self, text: str, kind: str) -> None:
+        binding = await self.store.binding()
+        if binding is not None:
+            await self.api.send_message(binding[1], text)
+
+
 class Scheduler:
     def __init__(
         self,
         *,
         db: Database,
-        api: TelegramAPI,
         digest: DigestService,
         linkedin: LinkedInCommands | None,
         timezone: str,
         message_interval_minutes: int,
+        api: TelegramAPI | None = None,
+        notifiers: Sequence[Notifier] = (),
         clock: Callable[[], datetime] = now,
     ) -> None:
-        self.db, self.api, self.digest, self.linkedin = db, api, digest, linkedin
+        self.db, self.digest, self.linkedin = db, digest, linkedin
         self.zone = ZoneInfo(timezone)
         self.interval = timedelta(minutes=message_interval_minutes)
         self.clock = clock
         self.store = WorkspaceStore(db)
-        self.telegram = TelegramStore(db)
         self.kv = KV(db)
         self.last_message_check: datetime | None = None
+        self.notifiers: list[Notifier] = list(notifiers)
+        if api is not None:
+            self.notifiers.append(TelegramNotifier(api, TelegramStore(db)))
+
+    async def ready(self) -> list[Notifier]:
+        return [n for n in self.notifiers if await n.ready()]
+
+    async def deliver(self, text: str, kind: str) -> None:
+        for notifier in await self.ready():
+            try:
+                await notifier.send(text, kind)
+            except Exception:
+                logging.warning("", extra={"event": "notify_failed"})
 
     async def tick(self) -> list[str]:
-        binding = await self.telegram.binding()
-        if binding is None:
-            return []
-        chat_id = binding[1]
+        if not await self.ready():
+            return []  # nobody to tell: no digest, no alerts, no LinkedIn visits
         settings = await self.store.digest()
         at = self.clock()
         local = at.astimezone(self.zone)
@@ -73,15 +107,15 @@ class Scheduler:
         ):
             # While paused the digest still arrives, built from local data only.
             done += await self.guard(
-                self.send_digest(chat_id, local.date().isoformat(), linkedin=not paused)
+                self.send_digest(local.date().isoformat(), linkedin=not paused)
             )
         if paused:
             return done  # no alerts and no LinkedIn visits while paused
         if not in_quiet_hours(hhmm, settings.quiet_start, settings.quiet_end):
             if settings.alerts_boards:
-                done += await self.guard(self.board_alerts(chat_id, settings, at))
+                done += await self.guard(self.board_alerts(settings, at))
             if settings.alerts_messages:
-                done += await self.guard(self.message_alerts(chat_id, at))
+                done += await self.guard(self.message_alerts(at))
         return done
 
     async def guard(self, work: Coroutine[Any, Any, list[str]]) -> list[str]:
@@ -91,12 +125,12 @@ class Scheduler:
             logging.warning("", extra={"event": "scheduler_failed"})
             return []
 
-    async def send_digest(self, chat_id: int, day: str, *, linkedin: bool = True) -> list[str]:
-        await self.api.send_message(chat_id, await self.digest.build(linkedin=linkedin))
+    async def send_digest(self, day: str, *, linkedin: bool = True) -> list[str]:
+        await self.deliver(await self.digest.build(linkedin=linkedin), "digest")
         await self.store.update_digest(last_digest_date=day)
         return ["digest"]
 
-    async def board_alerts(self, chat_id: int, settings: DigestSettings, at: datetime) -> list[str]:
+    async def board_alerts(self, settings: DigestSettings, at: datetime) -> list[str]:
         if settings.last_alert_at is None:
             await self.store.update_digest(last_alert_at=at.isoformat())
             return []  # alerts begin from the moment they are switched on
@@ -115,10 +149,10 @@ class Scheduler:
             f"• {m.title} — {m.company} · {m.location or 'location unknown'}\n  {m.url}"
             for m in matches[:8]
         ]
-        await self.api.send_message(chat_id, "🔔 New openings at pinned firms\n" + "\n".join(lines))
+        await self.deliver("🔔 New openings at pinned firms\n" + "\n".join(lines), "board_alert")
         return ["board_alert"]
 
-    async def message_alerts(self, chat_id: int, at: datetime) -> list[str]:
+    async def message_alerts(self, at: datetime) -> list[str]:
         if self.linkedin is None:
             return []
         if self.last_message_check is not None and at - self.last_message_check < self.interval:
@@ -129,7 +163,7 @@ class Scheduler:
             if await self.kv.get("linkedin_notice") == error:
                 return []  # already told the user about this problem
             await self.kv.set("linkedin_notice", error or "")
-            await self.api.send_message(chat_id, f"⚠️ {error}")
+            await self.deliver(f"⚠️ {error}", "auth_notice")
             return ["auth_notice"]
         await self.kv.set("linkedin_notice", "")
         # A conversation is announced when it becomes unread, and again only after it was
@@ -141,7 +175,7 @@ class Scheduler:
         if not fresh:
             return []
         names = ", ".join(c.title for c in fresh)
-        await self.api.send_message(chat_id, f"📬 {len(fresh)} unread conversation(s): {names}")
+        await self.deliver(f"📬 {len(fresh)} unread conversation(s): {names}", "message_alert")
         return ["message_alert"]
 
 
