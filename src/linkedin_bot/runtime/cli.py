@@ -38,6 +38,7 @@ from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.storage.workspace import WorkspaceStore
+from linkedin_bot.workflows.maintenance import Maintenance
 from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.telegram_bot import poll_forever
 
@@ -73,6 +74,10 @@ def parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="Run explicitly configured read work in the foreground")
     run.add_argument("--once", action="store_true", help="Process at most one due work item")
     commands.add_parser("pair", help="Print a one-use Telegram pairing code (valid ten minutes)")
+    commands.add_parser("unpair", help="Forget the paired Telegram chat")
+    commands.add_parser(
+        "prune", help="Snapshot, rotate automatic backups and drop old posting versions now"
+    )
     telegram = commands.add_parser("telegram", help="Poll Telegram in the foreground")
     telegram.add_argument("--once", action="store_true", help="Handle one polling batch")
     commands.add_parser(
@@ -247,6 +252,10 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                         "instruction": "Send /start <code> to your bot from a private chat",
                     }
                 )
+            elif args.command == "unpair":
+                emit({"unpaired": await TelegramStore(database).unpair()})
+            elif args.command == "prune":
+                emit(await Maintenance(database, config.timezone).run())
             elif args.command == "serve":
                 await telegram_foreground(database, config, once=False, background=True)
                 emit({"stopped": True})

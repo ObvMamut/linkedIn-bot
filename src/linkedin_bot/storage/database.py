@@ -8,10 +8,11 @@ import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from linkedin_bot.domain.models import (
     ActionResult,
@@ -31,6 +32,31 @@ from linkedin_bot.domain.models import (
 from linkedin_bot.runtime.privacy import BoundaryError, private_directory, safe_file
 
 T = TypeVar("T")
+
+
+TrackerStatus = Literal[
+    "new", "interested", "applied", "interviewing", "offer", "rejected", "dismissed"
+]
+TRACKER_STATUSES: tuple[TrackerStatus, ...] = (
+    "new",
+    "interested",
+    "applied",
+    "interviewing",
+    "offer",
+    "rejected",
+    "dismissed",
+)
+AUTO_BACKUP_PREFIX = "auto-"
+
+
+@dataclass(frozen=True)
+class PostingRecord:
+    observation: SourceObservation
+    first_seen: datetime
+    last_seen: datetime
+    status: str = "new"
+    note: str = ""
+    status_at: datetime | None = None
 
 
 class RevisionConflict(ValueError):
@@ -794,38 +820,161 @@ class Database:
         await self.call(write)
 
     async def opportunities(
-        self, since: datetime | None, *, first_seen_after: datetime | None = None
+        self,
+        since: datetime | None,
+        *,
+        first_seen_after: datetime | None = None,
+        include_dismissed: bool = False,
     ) -> tuple[SourceObservation, ...]:
         """Latest version of each posting.
 
         `since` drops postings not seen recently; `first_seen_after` keeps only postings whose
         first sighting (of any version) is later, so an edited posting never reads as new.
+        Postings you dismissed are left out unless asked for.
         """
-        return tuple(posting for posting, _ in await self.postings(since, first_seen_after))
+        rows = await self.postings(
+            since, first_seen_after=first_seen_after, include_dismissed=include_dismissed
+        )
+        return tuple(row.observation for row in rows)
 
     async def postings(
-        self, since: datetime | None, first_seen_after: datetime | None = None
-    ) -> tuple[tuple[SourceObservation, datetime], ...]:
-        """(latest version, first sighting) per posting, filtered in SQL."""
+        self,
+        since: datetime | None,
+        *,
+        first_seen_after: datetime | None = None,
+        include_dismissed: bool = False,
+    ) -> tuple[PostingRecord, ...]:
+        """Latest version, first and last sighting and tracker status per posting (in SQL)."""
         seen = None if since is None else since.astimezone(UTC).isoformat()
         first = None if first_seen_after is None else first_seen_after.astimezone(UTC).isoformat()
 
-        def read(connection: sqlite3.Connection) -> tuple[tuple[SourceObservation, datetime], ...]:
+        def read(connection: sqlite3.Connection) -> tuple[PostingRecord, ...]:
             rows = connection.execute(
-                "SELECT o.snapshot,f.first_seen FROM observations o JOIN "
+                "SELECT o.snapshot,f.first_seen,f.last_seen,s.status,s.note,s.updated_at "
+                "FROM observations o JOIN "
                 "(SELECT source,external_id,MAX(last_seen) last_seen,MIN(first_seen) first_seen "
                 "FROM observations GROUP BY source,external_id) f "
                 "ON o.source=f.source AND o.external_id=f.external_id AND o.last_seen=f.last_seen "
+                "LEFT JOIN opportunity_status s "
+                "ON s.source=o.source AND s.external_id=o.external_id "
                 "WHERE (? IS NULL OR f.last_seen>=?) AND (? IS NULL OR f.first_seen>?) "
+                "AND (? OR s.status IS NULL OR s.status!='dismissed') "
                 "GROUP BY o.source,o.external_id ORDER BY o.source,o.external_id",
-                (seen, seen, first, first),
+                (seen, seen, first, first, int(include_dismissed)),
             )
             return tuple(
-                (SourceObservation.model_validate_json(snapshot), datetime.fromisoformat(stamp))
-                for snapshot, stamp in rows
+                PostingRecord(
+                    observation=SourceObservation.model_validate_json(snapshot),
+                    first_seen=datetime.fromisoformat(first_seen),
+                    last_seen=datetime.fromisoformat(last_seen),
+                    status=status or "new",
+                    note=note or "",
+                    status_at=datetime.fromisoformat(status_at) if status_at else None,
+                )
+                for snapshot, first_seen, last_seen, status, note, status_at in rows
             )
 
         return await self.call(read)
+
+    async def posting(self, source: str, external_id: str) -> PostingRecord | None:
+        rows = await self.postings(None, include_dismissed=True)
+        return next(
+            (
+                r
+                for r in rows
+                if r.observation.source == source and r.observation.external_id == external_id
+            ),
+            None,
+        )
+
+    async def set_status(
+        self, source: str, external_id: str, status: TrackerStatus, note: str | None = None
+    ) -> None:
+        """Your own record of a posting (interested, applied, dismissed...). `new` clears it."""
+        if status not in TRACKER_STATUSES:
+            raise ValueError("unknown_status")
+        if note is not None and len(note) > 1000:
+            raise ValueError("note_too_long")
+        stamp = now().isoformat()
+
+        def write(connection: sqlite3.Connection) -> None:
+            with transaction(connection):
+                known = connection.execute(
+                    "SELECT 1 FROM observations WHERE source=? AND external_id=? LIMIT 1",
+                    (source, external_id),
+                ).fetchone()
+                if known is None:
+                    raise LookupError("unknown_posting")
+                if status == "new" and note is None:
+                    connection.execute(
+                        "DELETE FROM opportunity_status WHERE source=? AND external_id=?",
+                        (source, external_id),
+                    )
+                    return
+                connection.execute(
+                    "INSERT INTO opportunity_status VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(source,external_id) DO UPDATE SET status=excluded.status,"
+                    "note=CASE WHEN ? IS NULL THEN note ELSE excluded.note END,"
+                    "updated_at=excluded.updated_at",
+                    (source, external_id, status, note or "", stamp, note),
+                )
+
+        await self.call(write)
+
+    async def status_counts(self) -> dict[str, int]:
+        rows = await self.call(
+            lambda c: c.execute(
+                "SELECT status,count(*) FROM opportunity_status GROUP BY status"
+            ).fetchall()
+        )
+        return {str(status): int(count) for status, count in rows}
+
+    async def prune(
+        self, at: datetime, *, versions_days: int = 180, dismissed_days: int = 90
+    ) -> dict[str, int]:
+        """Drop old superseded versions, long gone dismissed postings and postings unseen for
+        a year (unless you track them). First sightings are kept on the surviving row."""
+        old = (at - timedelta(days=versions_days)).astimezone(UTC).isoformat()
+        gone = (at - timedelta(days=dismissed_days)).astimezone(UTC).isoformat()
+        stale = (at - timedelta(days=365)).astimezone(UTC).isoformat()
+
+        def write(connection: sqlite3.Connection) -> dict[str, int]:
+            with transaction(connection):
+                connection.execute(
+                    "UPDATE observations SET first_seen=(SELECT MIN(first_seen) "
+                    "FROM observations o WHERE o.source=observations.source "
+                    "AND o.external_id=observations.external_id)"
+                )
+                versions = connection.execute(
+                    "DELETE FROM observations WHERE last_seen<? AND EXISTS (SELECT 1 FROM "
+                    "observations n WHERE n.source=observations.source AND "
+                    "n.external_id=observations.external_id "
+                    "AND n.last_seen>observations.last_seen)",
+                    (old,),
+                ).rowcount
+                doomed = connection.execute(
+                    "SELECT o.source,o.external_id FROM observations o LEFT JOIN "
+                    "opportunity_status s ON s.source=o.source AND s.external_id=o.external_id "
+                    "GROUP BY o.source,o.external_id HAVING "
+                    "(MAX(o.last_seen)<? AND MAX(s.status)='dismissed') OR "
+                    "(MAX(o.last_seen)<? AND (MAX(s.status) IS NULL OR MAX(s.status)='dismissed'))",
+                    (gone, stale),
+                ).fetchall()
+                for source, external_id in doomed:
+                    connection.execute(
+                        "DELETE FROM observations WHERE source=? AND external_id=?",
+                        (source, external_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM opportunity_status WHERE source=? AND external_id=?",
+                        (source, external_id),
+                    )
+                return {"old_versions": versions, "old_postings": len(doomed)}
+
+        return await self.call(write)
+
+    async def vacuum(self) -> None:
+        await self.call(lambda c: c.execute("VACUUM"))
 
     async def status(self) -> dict[str, object]:
         def read(connection: sqlite3.Connection) -> dict[str, object]:
@@ -922,13 +1071,13 @@ class Database:
 
         return await self.call(inspect)
 
-    async def backup(self) -> Path:
+    async def backup(self, *, prefix: str = "") -> Path:
         def snapshot(connection: sqlite3.Connection) -> Path:
             parent = safe_file(self.root, "backups")
             private_directory(parent)
             temporary = parent / f".{identifier()}.tmp"
             private_directory(temporary)
-            destination = parent / identifier()
+            destination = parent / f"{prefix}{identifier()}"
             try:
                 database_path = temporary / "state.sqlite3"
                 with sqlite3.connect(database_path) as copy:
@@ -967,3 +1116,24 @@ class Database:
                 raise
 
         return await self.call(snapshot)
+
+
+def prune_backups(root: Path, keep: int = 7) -> int:
+    """Keep the newest `keep` automatic snapshots; manual ones are never removed."""
+    parent = safe_file(root, "backups")
+    if not parent.is_dir():
+        return 0
+    automatic = sorted(
+        (
+            entry
+            for entry in parent.iterdir()
+            if entry.is_dir()
+            and entry.name.startswith(AUTO_BACKUP_PREFIX)
+            and (entry / "manifest.json").is_file()
+        ),
+        key=lambda entry: (entry / "manifest.json").stat().st_mtime,
+        reverse=True,
+    )
+    for entry in automatic[keep:]:
+        shutil.rmtree(entry)
+    return max(0, len(automatic) - keep)

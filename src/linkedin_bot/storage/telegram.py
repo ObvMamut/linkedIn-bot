@@ -56,6 +56,16 @@ class TelegramStore:
 
         return await self.database.call(write)
 
+    async def unpair(self) -> bool:
+        """Forget the paired chat so `pair` can bind a new one. Update IDs stay recorded."""
+        cursor = await self.database.call(
+            lambda c: c.execute(
+                "UPDATE telegram_binding SET user_id=NULL,chat_id=NULL,paired_at=NULL,"
+                "code_hash=NULL,code_expires_at=NULL,code_attempts=0 WHERE user_id IS NOT NULL"
+            )
+        )
+        return bool(cursor.rowcount)
+
     async def binding(self) -> tuple[int, int] | None:
         row = await self.database.call(
             lambda c: c.execute("SELECT user_id,chat_id FROM telegram_binding").fetchone()

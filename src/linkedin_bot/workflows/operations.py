@@ -5,8 +5,8 @@ the same way.
 """
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from datetime import timedelta
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from linkedin_bot.adapters.ats import Board
@@ -20,7 +20,7 @@ from linkedin_bot.domain.models import (
     now,
 )
 from linkedin_bot.domain.workspace import Pin, SavedSearch
-from linkedin_bot.storage.database import Database
+from linkedin_bot.storage.database import Database, PostingRecord, TrackerStatus
 from linkedin_bot.storage.workspace import WorkspaceStore
 from linkedin_bot.workflows.linkedin_commands import Connector, LinkedInCommands
 from linkedin_bot.workflows.searching import split_job_query
@@ -59,6 +59,11 @@ class ResultItem:
     reasons: tuple[str, ...] = ()
     gaps: tuple[str, ...] = ()
     matched: bool = True
+    status: str = "new"
+    note: str = ""
+    first_seen: datetime | None = None
+    description: str | None = None
+    published_at: str | None = None
 
     @property
     def key(self) -> str:
@@ -94,42 +99,62 @@ def split_items(text: str) -> list[str]:
     return [part for part in parts if 0 < len(part) <= 60][:20]
 
 
-def job_item(match: Match) -> ResultItem:
-    return ResultItem(
-        kind="jobs",
-        title=f"💼 {match.title}",
-        url=match.url,
-        name=match.company or "",
-        lines=(
-            f"{match.company or match.source} · {match.location or 'location unknown'}",
-            f"score {match.score} — {', '.join(match.reasons)}",
-            f"Gaps: {', '.join(match.gaps)}" if match.gaps else "",
-        ),
-        score=match.score,
-        source=match.source,
-        external_id=match.external_id,
-        company=match.company,
-        location=match.location,
-        reasons=match.reasons,
-        gaps=match.gaps,
+def tracked(item: ResultItem, record: PostingRecord | None) -> ResultItem:
+    """Add what storage knows about the posting: your status, first sighting, description."""
+    if record is None:
+        return item
+    return replace(
+        item,
+        status=record.status,
+        note=record.note,
+        first_seen=record.first_seen,
+        description=record.observation.description,
+        published_at=record.observation.published_at,
     )
 
 
-def outside_item(posting: SourceObservation) -> ResultItem:
-    return ResultItem(
-        kind="jobs",
-        title=f"💼 {posting.title}",
-        url=posting.url,
-        name=posting.company or "",
-        lines=(
-            f"{posting.company} · {posting.location or 'location unknown'}",
-            "outside your settings",
+def job_item(match: Match, record: PostingRecord | None = None) -> ResultItem:
+    return tracked(
+        ResultItem(
+            kind="jobs",
+            title=f"💼 {match.title}",
+            url=match.url,
+            name=match.company or "",
+            lines=(
+                f"{match.company or match.source} · {match.location or 'location unknown'}",
+                f"score {match.score} — {', '.join(match.reasons)}",
+                f"Gaps: {', '.join(match.gaps)}" if match.gaps else "",
+            ),
+            score=match.score,
+            source=match.source,
+            external_id=match.external_id,
+            company=match.company,
+            location=match.location,
+            reasons=match.reasons,
+            gaps=match.gaps,
         ),
-        source=posting.source,
-        external_id=posting.external_id,
-        company=posting.company,
-        location=posting.location,
-        matched=False,
+        record,
+    )
+
+
+def outside_item(posting: SourceObservation, record: PostingRecord | None = None) -> ResultItem:
+    return tracked(
+        ResultItem(
+            kind="jobs",
+            title=f"💼 {posting.title}",
+            url=posting.url,
+            name=posting.company or "",
+            lines=(
+                f"{posting.company} · {posting.location or 'location unknown'}",
+                "outside your settings",
+            ),
+            source=posting.source,
+            external_id=posting.external_id,
+            company=posting.company,
+            location=posting.location,
+            matched=False,
+        ),
+        record,
     )
 
 
@@ -170,15 +195,43 @@ class Operations:
         return rank(recent, await self.db.preferences(), await self.store.pinned_tokens())
 
     async def ranked_jobs(
-        self, days: int = JOB_DAYS, *, include_outside: bool = False
+        self,
+        days: int = JOB_DAYS,
+        *,
+        include_outside: bool = False,
+        include_dismissed: bool = False,
     ) -> list[ResultItem]:
-        recent = await self.db.opportunities(since=now() - timedelta(days=days))
-        matches = rank(recent, await self.db.preferences(), await self.store.pinned_tokens())
-        items = [job_item(m) for m in matches]
+        """Best fit first, with your tracker status; optionally everything else after it."""
+        rows = await self.db.postings(
+            now() - timedelta(days=days), include_dismissed=include_dismissed
+        )
+        records: dict[tuple[str, str], PostingRecord] = {
+            (r.observation.source, r.observation.external_id): r for r in rows
+        }
+        observations = [r.observation for r in rows]
+        matches = rank(observations, await self.db.preferences(), await self.store.pinned_tokens())
+        items = [job_item(m, records.get((m.source, m.external_id))) for m in matches]
         if include_outside:
             matched = {(m.source, m.external_id) for m in matches}
-            items += [outside_item(o) for o in recent if (o.source, o.external_id) not in matched]
+            items += [
+                outside_item(o, records.get((o.source, o.external_id)))
+                for o in observations
+                if (o.source, o.external_id) not in matched
+            ]
         return items
+
+    async def set_status(
+        self, source: str, external_id: str, status: TrackerStatus, note: str | None = None
+    ) -> None:
+        await self.db.set_status(source, external_id, status, note)
+
+    async def tracked(self) -> list[ResultItem]:
+        """Postings you marked (anything but new), most recently changed first."""
+        rows = [
+            r for r in await self.db.postings(None, include_dismissed=True) if r.status != "new"
+        ]
+        rows.sort(key=lambda r: r.status_at or r.first_seen, reverse=True)
+        return [outside_item(r.observation, r) for r in rows]
 
     async def save_linkedin_jobs(self, parsed: Parsed[Any]) -> list[ResultItem]:
         """Store the public postings, then order them by your settings (best fit first)."""

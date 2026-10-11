@@ -197,7 +197,7 @@ class Bot:
             return "No local model is configured (inference.model). Nothing was drafted."
         if len(arguments) != 1:
             return "Usage: /prepare <source>:<id>, as shown by /opportunities."
-        postings = await self.db.opportunities(since=None)
+        postings = await self.db.opportunities(since=None, include_dismissed=True)
         posting = next((p for p in postings if f"{p.source}:{p.external_id}" == arguments[0]), None)
         if posting is None:
             return "Unknown opportunity."

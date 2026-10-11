@@ -25,6 +25,7 @@ from linkedin_bot.workflows.boards import find_board, public_probe
 from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import Connector, LinkedInCommands
+from linkedin_bot.workflows.maintenance import Maintenance, maintenance_loop
 from linkedin_bot.workflows.materials import Generator
 from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.onboarding import Onboarding
@@ -94,6 +95,7 @@ class Services:
             api=telegram,
             notifiers=notifiers or [],
         )
+        self.maintenance = Maintenance(database, config.timezone)
         self.tasks: list[asyncio.Task[None]] = []
 
     @classmethod
@@ -116,6 +118,7 @@ class Services:
         """Board collection, digest and alerts, and optionally Telegram polling."""
         self.tasks.append(asyncio.create_task(monitor_loop(self.collect_once, stop)))
         self.tasks.append(asyncio.create_task(run_scheduler(self.scheduler, stop)))
+        self.tasks.append(asyncio.create_task(maintenance_loop(self.maintenance, stop)))
         if poll_telegram and self.bot is not None and self.api is not None:
             self.tasks.append(asyncio.create_task(self._poll(stop)))
 
