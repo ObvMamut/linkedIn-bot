@@ -162,26 +162,27 @@ class WorkspaceStore:
         )
 
     async def update_digest(self, **changes: object) -> DigestSettings:
+        """Validate, then write only the changed columns, so a concurrent change to another
+        setting (the scheduler stamping `last_alert_at` while you toggle a switch) survives."""
+        unknown = set(changes) - set(DigestSettings.model_fields)
+        if unknown:
+            raise ValueError("unknown_digest_setting")
         updated = DigestSettings.model_validate(
             {**(await self.digest()).model_dump(), **changes}, strict=False
         )
-        await self.database.call(
-            lambda c: c.execute(
-                "UPDATE digest_settings SET enabled=?,local_time=?,alerts_boards=?,"
-                "alerts_messages=?,quiet_start=?,quiet_end=?,last_digest_date=?,last_alert_at=?",
-                (
-                    int(updated.enabled),
-                    updated.local_time,
-                    int(updated.alerts_boards),
-                    int(updated.alerts_messages),
-                    updated.quiet_start,
-                    updated.quiet_end,
-                    updated.last_digest_date,
-                    updated.last_alert_at,
-                ),
+        values = {
+            name: int(value) if isinstance(value, bool) else value
+            for name, value in updated.model_dump().items()
+            if name in changes
+        }
+        if values:
+            assignments = ",".join(f"{name}=?" for name in values)  # names are model fields
+            await self.database.call(
+                lambda c: c.execute(
+                    f"UPDATE digest_settings SET {assignments}", tuple(values.values())
+                )
             )
-        )
-        return updated
+        return await self.digest()
 
     # --- pending text input -------------------------------------------------------------
     async def awaiting(self) -> tuple[str, dict[str, object]] | None:

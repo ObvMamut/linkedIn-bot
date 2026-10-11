@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx
 
@@ -16,34 +16,53 @@ from linkedin_bot.adapters.telegram import (
 )
 from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
-    MAX_DAILY_APPLICATIONS,
-    MAX_DAILY_COMMUNICATIONS,
-    Artifact,
-    CandidateFact,
-    SearchPreferences,
-    digest,
-    identifier,
     now,
 )
 from linkedin_bot.runtime.privacy import BoundaryError
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows import approvals
 from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
+from linkedin_bot.workflows.facts import add_typed_fact
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
-from linkedin_bot.workflows.ui.router import UI, BoardFinder
+from linkedin_bot.workflows.onboarding import PROMPTS, Onboarding
+from linkedin_bot.workflows.operations import Operations
+from linkedin_bot.workflows.ui.router import BOARD_INTERVAL_SECONDS, UI, BoardFinder
 
-STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
-PROMPTS = {
-    "roles": "Which roles or internships are you targeting? (comma separated)",
-    "locations": "Which locations, and is remote acceptable? Say 'remote ok' if it is.",
-    "exclusions": "Any companies, sectors or role types to exclude? (comma separated, or 'none')",
-    "eligibility": "What is your work eligibility (citizenship, visa needs)? I will not guess it.",
-    "cv": "Paste your CV as text. I never ask for LinkedIn passwords, codes or cookies here.",
-}
 MODE_LINE = "Mode: draft_only. Nothing is sent to employers; application and message caps are 0."
+COMMANDS: tuple[tuple[str, str], ...] = (
+    ("menu", "Button menu: messages, search, pinned, jobs, saved, settings"),
+    ("jobs", "Best matches for your settings"),
+    ("pins", "Pinned firms and people"),
+    ("saved", "Saved searches"),
+    ("settings", "Ranking rules and priorities"),
+    ("digest", "Daily digest and alerts"),
+    ("facts", "Facts drafts may cite"),
+    ("status", "Mode and progress"),
+    ("opportunities", "Ranked matches as text"),
+    ("prepare", "Draft a cover letter: /prepare <source>:<id>"),
+    ("pending", "Actions waiting for you"),
+    ("policy", "Show or change mode and caps"),
+    ("li_status", "LinkedIn session state"),
+    ("li_messages", "Latest LinkedIn conversations"),
+    ("pause", "Pause background work"),
+    ("resume", "Resume reads (still draft only)"),
+    ("help", "Every command"),
+)
+SHORTCUTS = {
+    "/jobs": "m:jobs",
+    "/pins": "m:pins",
+    "/saved": "m:saved",
+    "/settings": "m:set",
+    "/digest": "set:digest",
+    "/facts": "m:facts",
+}
 HELP = (
+    "/menu open the button menu (messages, search, pinned, jobs, saved, settings, facts)\n"
+    "/jobs /pins /saved /settings /digest /facts open one screen directly\n"
+    "/fact kind: text add a confirmed fact, e.g. /fact skill: Python, 3 years\n"
     "/start resume onboarding\n/status show mode and progress\n"
     "/opportunities show ranked matches from collected postings\n"
     "/prepare <id> draft a cover letter for review\n"
@@ -51,15 +70,10 @@ HELP = (
     "/approve <id>, /reject <id> decide one proposed action\n"
     "/policy show or change mode and daily caps (changes need 'confirm')\n"
     "/resolve <action> success|none <note> record what you saw for an unknown outcome\n"
-    "/menu open the button menu (messages, search, pinned, jobs, saved, settings)\n"
     "/li_status /li_messages /li_search /li_profile read-only LinkedIn access\n"
     "/li_release free the browser profile (before `linkedin login`)\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
 )
-
-
-def split(text: str) -> tuple[str, ...]:
-    return tuple(part.strip() for part in text.replace("\n", ",").split(",") if part.strip())
 
 
 class Bot:
@@ -71,6 +85,10 @@ class Bot:
         executor: Executor | None = None,
         linkedin: LinkedInCommands | None = None,
         board_finder: BoardFinder | None = None,
+        board_interval_seconds: int = BOARD_INTERVAL_SECONDS,
+        *,
+        operations: Operations | None = None,
+        digest_service: DigestService | None = None,
     ) -> None:
         self.db = database
         self.api = api
@@ -78,13 +96,17 @@ class Bot:
         self.executor = executor or Executor(database)
         self.linkedin = linkedin
         self.store = TelegramStore(database)
+        self.onboarding = Onboarding(database)
         self.ui = UI(
             database,
             api,
             linkedin,
             board_finder,
             llm_enabled=generator is not None,
-            digest_service=DigestService(database, linkedin, generator),
+            digest_service=digest_service or DigestService(database, linkedin, generator),
+            board_interval_seconds=board_interval_seconds,
+            operations=operations,
+            generator=generator,
         )
 
     async def handle(self, update: Update) -> None:
@@ -97,8 +119,25 @@ class Bot:
                 await self._dispatch(message.sender.id, message.chat.id, message.text.strip())
             elif query is not None and query.data and query.message is not None:
                 await self._press(query.sender.id, query.message.chat, query)
+        except Exception:
+            # One failing update must never stop the bot. Only the event name is logged.
+            logging.warning("", extra={"event": "telegram_handler_failed"})
+            sender = message.sender.id if message is not None else None
+            chat = message.chat.id if message is not None else None
+            if query is not None and query.message is not None:
+                sender, chat = query.sender.id, query.message.chat.id
+            await self._apologise(sender, chat)
         finally:
             await self.store.record_update(update.update_id)
+
+    async def _apologise(self, user_id: int | None, chat_id: int | None) -> None:
+        """Tell the paired user (and nobody else) that the last request failed."""
+        try:
+            if user_id is not None and await self.store.binding() == (user_id, chat_id):
+                assert chat_id is not None
+                await self._reply(chat_id, "Something went wrong with that request. Try again.")
+        except Exception:
+            logging.warning("", extra={"event": "telegram_reply_failed"})
 
     async def _press(self, user_id: int, chat: Chat, query: CallbackQuery) -> None:
         """Buttons get the same authorisation as messages: the paired user in the paired chat."""
@@ -121,6 +160,15 @@ class Bot:
         if command == "/menu":
             await self.ui.open_menu(chat_id)
             return
+        if command in SHORTCUTS:
+            await self.ui.open(chat_id, SHORTCUTS[command])
+            return
+        if command == "/fact":
+            await self._reply(chat_id, await self._fact(text.partition(" ")[2]))
+            return
+        if command is not None:
+            # A typed command abandons any half-finished button prompt.
+            await self.ui.store.clear_awaiting()
         if command is None and await self.ui.handle_text(chat_id, text):
             return
         if command == "/start":
@@ -131,7 +179,7 @@ class Bot:
             await self._reply(
                 chat_id,
                 f"{MODE_LINE}\nPaused: {status['paused']}\nOnboarding: {step}\n"
-                f"Facts: {status['facts']}  Opportunities seen: {status['observations']}",
+                f"Facts: {status['facts']}  Opportunities seen: {status['postings']}",
             )
         elif command == "/opportunities":
             await self._reply(chat_id, await self._opportunities())
@@ -185,7 +233,7 @@ class Bot:
             return "No local model is configured (inference.model). Nothing was drafted."
         if len(arguments) != 1:
             return "Usage: /prepare <source>:<id>, as shown by /opportunities."
-        postings = await self.db.opportunities(since=None)
+        postings = await self.db.opportunities(since=None, include_dismissed=True)
         posting = next((p for p in postings if f"{p.source}:{p.external_id}" == arguments[0]), None)
         if posting is None:
             return "Unknown opportunity."
@@ -216,61 +264,40 @@ class Bot:
         parts = text.split()
         if len(parts) != 2:
             return f"Usage: {parts[0]} <approval id>"
-        outcome = await self.executor.decide(parts[1], approve=approve)
-        if outcome == "stale":
-            return "That approval is no longer valid (used, expired, edited or policy changed)."
-        if outcome == "rejected":
-            return "Rejected. Nothing will be sent."
-        action_id = await self.db.call(
-            lambda c: c.execute(
-                "SELECT action_id FROM approvals WHERE id=?", (parts[1],)
-            ).fetchone()[0]
-        )
-        reasons = await self.executor.run(action_id)
-        if reasons:
-            return f"Approved, but blocked: {', '.join(reasons)}. Nothing was sent."
-        _, state = await self.db.action(action_id)
-        return f"Dispatched once. Outcome: {state}."
+        return await approvals.decide(self.db, self.executor, parts[1], approve)
 
     async def _policy(self, arguments: list[str]) -> str:
         current = await self.db.policy()
-        summary = (
-            f"mode={current.mode} applications/day={current.application_cap} "
-            f"messages/day={current.communication_cap}"
-        )
+        summary = approvals.describe(current)
         if not arguments:
             return summary
         confirmed = arguments[-1] == "confirm"
         change = arguments[:-1] if confirmed else arguments
-        update: dict[str, object]
-        if len(change) == 2 and change[0] == "mode" and change[1] in ("draft_only", "reviewed"):
-            update = {"mode": change[1]}
-        elif (
-            len(change) == 3
-            and change[0] == "cap"
-            and change[1] in ("application", "communication")
-            and change[2].isdecimal()
-        ):
-            ceiling = (
-                MAX_DAILY_APPLICATIONS if change[1] == "application" else MAX_DAILY_COMMUNICATIONS
-            )
-            if int(change[2]) > ceiling:
-                return f"The hard ceiling for {change[1]} is {ceiling} per day."
-            update = {f"{change[1]}_cap": int(change[2])}
-        else:
-            return "Usage: /policy [mode draft_only|reviewed | cap application|communication N]"
-        proposed = current.model_copy(update={**update, "revision": current.revision + 1})
+        try:
+            if len(change) == 2 and change[0] == "mode" and change[1] in ("draft_only", "reviewed"):
+                proposed = approvals.propose(current, mode=change[1])
+            elif (
+                len(change) == 3
+                and change[0] == "cap"
+                and change[1] in ("application", "communication")
+                and change[2].isdecimal()
+            ):
+                count = int(change[2])
+                proposed = (
+                    approvals.propose(current, application_cap=count)
+                    if change[1] == "application"
+                    else approvals.propose(current, communication_cap=count)
+                )
+            else:
+                return "Usage: /policy [mode draft_only|reviewed | cap application|communication N]"
+        except ValueError as exc:
+            return str(exc)
         if not confirmed:
             return (
-                f"Before: {summary}\nAfter: mode={proposed.mode} "
-                f"applications/day={proposed.application_cap} "
-                f"messages/day={proposed.communication_cap}\n"
+                f"Before: {summary}\nAfter: {approvals.describe(proposed)}\n"
                 "Pending actions will need fresh approval. Repeat the command with 'confirm'."
             )
-        await self.db.save_policy(
-            proposed.model_copy(update={"paused": False, "restore_audit_required": False}),
-            current.revision,
-        )
+        await approvals.apply(self.db, proposed, current)
         return (
             f"Policy updated to revision {proposed.revision}. Pending approvals were invalidated."
         )
@@ -278,77 +305,35 @@ class Bot:
     async def _resolve(self, arguments: list[str]) -> str:
         if len(arguments) < 2 or arguments[1] not in ("success", "none"):
             return "Usage: /resolve <action id> success|none <evidence note>"
-        if len(arguments) < 3 or not arguments[2].strip():
+        if len(arguments) < 3:
             return "An evidence note is required: say what you inspected."
-        done = await self.db.resolve_unknown(arguments[0], arguments[1] == "success", arguments[2])
-        return "Recorded as your attestation." if done else "No unknown action with that id."
+        return await approvals.resolve(
+            self.db, arguments[0], arguments[1] == "success", arguments[2]
+        )
+
+    async def _fact(self, text: str) -> str:
+        if not text.strip():
+            return "Usage: /fact kind: text, e.g. /fact skill: Python, 3 years"
+        try:
+            fact = await add_typed_fact(self.db, text)
+        except ValueError:
+            return "A fact is 1 to 500 characters."
+        return f"Saved as a confirmed {fact.kind} fact. See /facts."
 
     async def _prompt(self) -> str:
-        step, _ = await self.store.onboarding()
-        return "Onboarding is complete. Use /status or /help." if step == "done" else PROMPTS[step]
+        return await self.onboarding.prompt()
 
     async def _answer(self, chat_id: int, text: str) -> None:
-        step, answers = await self.store.onboarding()
-        if step == "done":
+        if await self.onboarding.done():
             await self._reply(chat_id, "Onboarding is complete. Use /help.")
             return
-        answers[step] = text
-        following = STEPS[STEPS.index(step) + 1] if step != STEPS[-1] else "done"
-        if following == "done":
-            await self._finish(answers, now())
-        await self.store.set_onboarding(following, answers)
+        following = await self.onboarding.answer(text, now())
         await self._reply(
             chat_id,
             "Saved. Onboarding is complete; I will not act until later milestones release it."
             if following == "done"
             else f"Saved. {PROMPTS[following]}",
         )
-
-    async def _finish(self, answers: dict[str, str], at: datetime) -> None:
-        remote = "remote" in answers["locations"].lower() or None
-        places = tuple(
-            p for p in split(answers["locations"]) if p.lower() not in ("remote ok", "remote")
-        )
-        roles = split(answers["roles"])
-        current = await self.db.call(
-            lambda c: c.execute("SELECT MAX(revision) FROM preferences").fetchone()[0]
-        )
-        exclusions = () if answers["exclusions"].lower() == "none" else split(answers["exclusions"])
-        await self.db.save_preferences(
-            SearchPreferences(
-                revision=current + 1,
-                roles=roles,
-                locations=places,
-                remote=remote,
-                internship=any("intern" in role.lower() for role in roles) or None,
-                exclusions=exclusions,
-            ),
-            current,
-        )
-        await self.db.save_fact(
-            CandidateFact(
-                kind="work_eligibility",
-                value=answers["eligibility"],
-                source_reference="telegram:onboarding",
-                status="confirmed",
-                confirmed_at=at,
-            )
-        )
-        content = answers["cv"].encode()
-        artifact_id = identifier()
-        profile = await self.db.profile()
-        await self.db.save_artifact(
-            content,
-            Artifact(
-                id=artifact_id,
-                kind="baseline_cv",
-                relative_path=f"artifacts/{artifact_id}",
-                sha256=digest(content),
-                profile_revision=profile.revision,
-                generator_version="user-supplied",
-            ),
-        )
-        logging.info("", extra={"event": "onboarding_completed"})
 
     async def _reply(self, chat_id: int, text: str) -> None:
         await self.api.send_message(chat_id, text)
@@ -370,9 +355,16 @@ async def poll_forever(
     *,
     once: bool = False,
     backoff: float = 5.0,
+    stop_when_unpaired: TelegramStore | None = None,
 ) -> None:
-    """Poll until asked to stop. Network errors back off and retry instead of ending the bot."""
+    """Poll until asked to stop. Network errors back off and retry instead of ending the bot.
+
+    With `stop_when_unpaired`, polling also ends once nobody is paired and no pairing code is
+    waiting (an expired code, or `unpair`), so a stranger's messages are not even fetched.
+    """
     while not stop.is_set():
+        if stop_when_unpaired is not None and not await stop_when_unpaired.polling_allowed(now()):
+            return
         polling = asyncio.ensure_future(poll_once(bot, api))
         waiting = asyncio.ensure_future(stop.wait())
         await asyncio.wait({polling, waiting}, return_when=asyncio.FIRST_COMPLETED)

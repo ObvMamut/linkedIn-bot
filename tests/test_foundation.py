@@ -545,7 +545,12 @@ def test_cli_foreground_init_doctor_backup_without_network(tmp_path):
         return json.loads(result.stdout)
 
     assert invoke("init")["policy"]["application_cap"] == 0
-    assert invoke("doctor")["capabilities"]["employer_effects"] == "disabled"
+    report = invoke("doctor")
+    assert report["capabilities"]["employer_effects"] == "disabled"
+    assert report["capabilities"]["linkedin"]["session"] == "unknown"
+    assert report["capabilities"]["linkedin"]["budget"]["daily_limit"] == 150
+    assert report["capabilities"]["inference"] == "not_configured"
+    assert report["postings"] == 0 and report["work_states"] == {}
     assert invoke("run", "--once")["stopped"]
     assert Path(invoke("backup")["snapshot"]).is_dir()
 

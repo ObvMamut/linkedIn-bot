@@ -26,6 +26,7 @@ The agreed direction is local Python, SQLite, a project-owned Playwright LinkedI
 | 8 | [Applications and outreach](applications-and-outreach.md) | Application materials, forms, employer communication |
 | 9 | [LLM and evaluation](llm-and-evaluation.md) | Inference routing, validation, model selection |
 | 10 | [Telegram interface](telegram-interface.md) | User journeys, commands, approval interactions |
+| 10b | [Terminal cockpit](tui.md) | The `tui` process model, views and their rules |
 | 11 | [Security and privacy](security-and-privacy.md) | Secrets, personal data, external-content boundaries |
 | 12 | [Operations](operations.md) | Configuration, scheduling, startup, maintenance |
 | 13 | [Validation](validation.md) | Tests and release gates |

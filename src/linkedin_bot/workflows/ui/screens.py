@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from linkedin_bot.adapters.linkedin.models import Conversation
-from linkedin_bot.domain.models import DEFAULT_PRIORITIES, SearchPreferences
+from linkedin_bot.domain.models import DEFAULT_PRIORITIES, CandidateFact, SearchPreferences
 from linkedin_bot.domain.workspace import DigestSettings, Pin, SavedSearch
 from linkedin_bot.workflows.ui.keyboard import Button, Keyboard, Screen
 
@@ -54,7 +54,7 @@ def main_menu() -> Screen:
             [Button("📬 Messages", "m:msgs"), Button("🔎 Search", "m:search")],
             [Button("⭐ Pinned", "m:pins"), Button("💼 Jobs", "m:jobs")],
             [Button("💾 Saved", "m:saved"), Button("⚙️ Settings", "m:set")],
-            [Button("📊 Status", "m:status")],
+            [Button("🧾 Facts", "m:facts"), Button("📊 Status", "m:status")],
         ],
     )
 
@@ -106,6 +106,7 @@ def card(
     pinnable: bool,
     saved_id: str | None = None,
     can_save: bool = True,
+    draftable: bool = False,
 ) -> Screen:
     """One result per page with Prev/Next, so a long list never floods the chat."""
     item = items[index]
@@ -113,6 +114,8 @@ def card(
     for extra in item.get("lines", []):
         if extra:
             lines.append(extra)
+    if item.get("status", "new") != "new":
+        lines.append(f"Your status: {item['status']}")
     lines.append(f"\n{index + 1}/{len(items)}")
     nav: list[Button] = []
     if index > 0:
@@ -125,6 +128,15 @@ def card(
     if item.get("url"):
         actions.append(Button("🔗 Open", url=item["url"]))
     keyboard: Keyboard = [row for row in (nav, actions) if row]
+    if item.get("posting"):
+        tracker = [
+            Button("⭐ Interested", f"tk:{token}:{index}:i"),
+            Button("✅ Applied", f"tk:{token}:{index}:a"),
+            Button("🗑 Dismiss", f"tk:{token}:{index}:x"),
+        ]
+        if draftable:
+            tracker.append(Button("✍️ Draft", f"tk:{token}:{index}:w"))
+        keyboard.append(tracker)
     extra_row: list[Button] = []
     if can_save and saved_id is None:
         extra_row.append(Button("💾 Save search", f"sv:{token}"))
@@ -403,3 +415,40 @@ def status_screen(
         f"AI matching: {'enabled' if llm_enabled else 'not enabled'}",
     ]
     return Screen("\n".join(lines), [[Button("🔄 Refresh", "m:status"), HOME]])
+
+
+FACT_ICONS = {"confirmed": "✅", "unconfirmed": "⏳", "rejected": "❌"}
+
+
+def facts_screen(facts: Sequence[CandidateFact], llm_enabled: bool) -> Screen:
+    """Facts drafts may cite. Pending ones get Confirm/Reject buttons."""
+    shown = [f for f in facts if f.status != "rejected"][:20]
+    lines = ["🧾 Facts drafts may cite (only confirmed ones are ever used)", ""]
+    if not shown:
+        lines.append("None yet. Add one, or send /fact skill: Python, 3 years")
+    for number, fact in enumerate(shown, start=1):
+        lines.append(
+            f"{number}. {FACT_ICONS[fact.status]} {fact.kind}: {clip(fact.value or '', 120)}"
+        )
+    rows: Keyboard = []
+    for number, fact in enumerate(shown, start=1):
+        if fact.status == "unconfirmed":
+            rows.append(
+                [
+                    Button(f"✅ Confirm {number}", f"fc:{fact.id}:c"),
+                    Button(f"❌ Reject {number}", f"fc:{fact.id}:r"),
+                ]
+            )
+    removable = [
+        Button(f"❌ {number}", f"fc:{fact.id}:r")
+        for number, fact in enumerate(shown, start=1)
+        if fact.status == "confirmed"
+    ]
+    for start in range(0, len(removable), 5):
+        rows.append(removable[start : start + 5])
+    extra = [Button("➕ Add fact", "fa")]
+    if llm_enabled:
+        extra.append(Button("🤖 Propose from CV", "fx"))
+    rows.append(extra)
+    rows.append([HOME])
+    return Screen("\n".join(lines), rows)

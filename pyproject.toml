@@ -3,7 +3,12 @@ name = "linkedin-bot"
 version = "0.1.0"
 description = "Local, draft-only personal job-search agent foundations"
 requires-python = ">=3.14,<3.15"
-dependencies = ["pydantic>=2.12,<3", "httpx>=0.28,<0.29", "playwright>=1.58,<2"]
+dependencies = [
+    "pydantic>=2.12,<3",
+    "httpx>=0.28,<0.29",
+    "playwright>=1.58,<2",
+    "textual>=6,<9",
+]
 
 [project.scripts]
 linkedin-bot = "linkedin_bot.runtime.cli:main"
@@ -28,6 +33,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.ruff.lint.per-file-ignores]
 # Screen copy is long prose and reads better unwrapped.
 "src/linkedin_bot/workflows/ui/*.py" = ["E501"]
+"src/linkedin_bot/tui/**/*.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.14"

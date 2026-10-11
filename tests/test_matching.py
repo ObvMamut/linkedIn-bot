@@ -189,3 +189,54 @@ def test_detect_language_handles_each_supported_language_and_unknowns():
     for code, text in samples.items():
         assert detect_language(text) == code, code
     assert detect_language("ML") is None and detect_language("") is None
+
+
+# ---- whole word matching -----------------------------------------------------------------
+
+from linkedin_bot.domain.matching import has_term, matches_firm, type_of  # noqa: E402
+
+
+def test_internship_detection_uses_whole_words():
+    assert type_of("Internal Audit Manager") == "full_time"
+    assert type_of("International Sales Lead") == "full_time"
+    assert type_of("Backstage Engineer") == "full_time"
+    assert type_of("Software Engineering Intern") == "internship"
+    assert type_of("Summer Internships 2027") == "internship"
+    assert type_of("Contractual Obligations Analyst") == "full_time"
+
+
+def test_keywords_match_whole_words_with_plurals():
+    assert has_term("we use javascript", "java") is False
+    assert has_term("java and kotlin", "Java") is True
+    assert has_term("several engineers wanted", "engineer") is True
+    assert has_term("c++ developer", "c++") is True
+    assert has_term("anything", "") is False
+
+
+def test_exclusions_and_blocked_firms_no_longer_hit_parts_of_words():
+    items = [
+        posting("a", "Data Scientist", "Berlin", description="javascript front end"),
+        posting("b", "Data Scientist", "Berlin", description="java back end"),
+        posting("c", "Data Scientist", "Berlin", company="Metabase"),
+    ]
+    matches = rank(items, prefs(exclusions=("java",), blocked_firms=("meta",)))
+    assert [m.external_id for m in matches] == ["a", "c"]
+
+
+def test_pinned_firm_tokens_need_a_whole_word():
+    assert matches_firm("Metabase", {"meta"}) is False
+    assert matches_firm("Meta Platforms", {"meta"}) is True
+    assert matches_firm("", {"meta"}) is False
+    item = posting("a", "Data Scientist", "Berlin", company="Metabase")
+    [match] = rank([item], prefs(), pinned=("meta",))
+    assert "pinned firm" not in match.reasons
+
+
+def test_on_site_only_marks_remote_postings_as_a_gap():
+    remote = posting("r", "Data Scientist", "Remote")
+    office = posting("o", "Data Scientist", "Berlin")
+    matches = rank([remote, office], prefs(remote=False))
+    assert [m.external_id for m in matches] == ["o", "r"]
+    assert any("on-site only" in gap for gap in matches[1].gaps)
+    [anywhere] = rank([remote], SearchPreferences(roles=("data scientist",), remote=False))
+    assert anywhere.gaps and anywhere.score < rank([office], prefs())[0].score

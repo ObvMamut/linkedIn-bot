@@ -8,7 +8,7 @@ from typing import Any
 
 from linkedin_bot.adapters.linkedin.pages import Parsed
 from linkedin_bot.adapters.public_http import AdapterError
-from linkedin_bot.domain.matching import rank, type_of
+from linkedin_bot.domain.matching import matches_firm, rank, type_of
 from linkedin_bot.domain.models import SourceObservation, now
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.workspace import WorkspaceStore
@@ -48,12 +48,18 @@ class DigestService:
         self.db, self.linkedin, self.generator, self.clock = database, linkedin, generator, clock
         self.store = WorkspaceStore(database)
 
-    async def build(self) -> str:
+    async def build(self, *, linkedin: bool = True) -> str:
+        """`linkedin=False` builds from local data only (used while paused)."""
         at = self.clock()
         preferences = await self.db.preferences()
         pinned = await self.store.pinned_tokens()
         everything = await self.db.opportunities(since=at - timedelta(days=60))
-        fresh = [o for o in everything if o.observed_at >= at - timedelta(days=1)]
+        # New means first seen in the last day; an edited old posting is not new.
+        fresh = list(
+            await self.db.opportunities(
+                since=at - timedelta(days=60), first_seen_after=at - timedelta(days=1)
+            )
+        )
         sections = [f"📰 Daily digest — {at.date().isoformat()}"]
 
         matches = rank(fresh, preferences, pinned, at)[:5]
@@ -69,16 +75,18 @@ class DigestService:
         else:
             sections.append("🏆 New matches\nNothing new that fits your settings.")
 
-        firms = [p for p in await self.store.pins("firm") if p.board_slug]
-        if firms:
-            lines = []
-            for firm in firms:
-                slug = (firm.board_slug or "").lower()
-                count = sum(1 for o in everything if (o.company or "").lower() == slug)
+        lines = []
+        for firm in await self.store.pins("firm"):
+            tokens = {firm.name, *([firm.board_slug] if firm.board_slug else [])}
+            count = sum(1 for o in everything if matches_firm(o.company or "", tokens))
+            if count or firm.board_slug:
                 lines.append(f"• {firm.name}: {opening_count(count)}")
+        if lines:
             sections.append("⭐ Pinned firms\n" + "\n".join(lines))
 
-        if self.linkedin is not None:
+        if self.linkedin is not None and not linkedin:
+            sections.append("⏸ Paused: LinkedIn sections were skipped.")
+        elif self.linkedin is not None:
             saved = await self.saved_searches()
             if saved:
                 sections.append("💾 Saved searches\n" + "\n".join(saved))
@@ -120,7 +128,7 @@ class DigestService:
         candidates = [
             o
             for o in fresh
-            if (o.company or "").lower() in pinned and type_of(o.title) == "internship"
+            if matches_firm(o.company or "", pinned) and type_of(o.title) == "internship"
         ][:MAX_ASSESSED]
         if not candidates:
             return "🤖 AI check: no new internships at pinned firms"

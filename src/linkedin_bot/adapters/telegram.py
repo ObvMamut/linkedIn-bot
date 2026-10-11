@@ -69,6 +69,33 @@ class TelegramPoller(TelegramAPI, Protocol):
     async def get_updates(self, offset: int, poll_seconds: int = 30) -> list[Update]: ...
 
 
+MESSAGE_LIMIT = 4000  # Telegram allows 4096 characters per message
+
+
+def chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Split on line boundaries so long replies arrive whole instead of cut off."""
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:  # a single overlong line is cut hard
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    return parts
+
+
 def parse_updates(payload: Any) -> list[Update]:
     """Keep every update ID so offsets advance; unusable messages become `message=None`."""
     if not isinstance(payload, dict) or payload.get("ok") is not True:
@@ -116,18 +143,27 @@ class HttpTelegram:
         return parse_updates(response.json())
 
     async def send_message(self, chat_id: int, text: str, markup: Markup | None = None) -> int:
-        body: dict[str, Any] = {"chat_id": chat_id, "text": text[:4000]}
-        if markup is not None:
-            body["reply_markup"] = markup
-        response = await self._call("sendMessage", body)
-        if response.status_code != 200:
-            raise BoundaryError("telegram_http_status")
-        return int(response.json()["result"]["message_id"])
+        """Long text goes out as several messages; buttons ride on the last one."""
+        parts = chunks(text)
+        message_id = 0
+        for index, part in enumerate(parts):
+            body: dict[str, Any] = {"chat_id": chat_id, "text": part}
+            if markup is not None and index == len(parts) - 1:
+                body["reply_markup"] = markup
+            response = await self._call("sendMessage", body)
+            if response.status_code != 200:
+                raise BoundaryError("telegram_http_status")
+            message_id = int(response.json()["result"]["message_id"])
+        return message_id
 
     async def edit_message(
         self, chat_id: int, message_id: int, text: str, markup: Markup | None = None
     ) -> None:
-        body: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text[:4000]}
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text[:MESSAGE_LIMIT],
+        }
         if markup is not None:
             body["reply_markup"] = markup
         response = await self._call("editMessageText", body)
@@ -136,6 +172,13 @@ class HttpTelegram:
         if "message is not modified" in response.text:
             return  # the screen is already showing exactly this
         raise BoundaryError("telegram_edit_failed")
+
+    async def set_commands(self, commands: list[tuple[str, str]]) -> None:
+        """The command list Telegram shows in its menu button."""
+        body = {"commands": [{"command": c, "description": d[:256]} for c, d in commands]}
+        response = await self._call("setMyCommands", body)
+        if response.status_code != 200:
+            raise BoundaryError("telegram_http_status")
 
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         await self._call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
