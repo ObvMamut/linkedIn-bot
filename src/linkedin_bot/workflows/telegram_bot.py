@@ -16,13 +16,12 @@ from linkedin_bot.adapters.telegram import (
 )
 from linkedin_bot.domain.matching import rank
 from linkedin_bot.domain.models import (
-    MAX_DAILY_APPLICATIONS,
-    MAX_DAILY_COMMUNICATIONS,
     now,
 )
 from linkedin_bot.runtime.privacy import BoundaryError
 from linkedin_bot.storage.database import Database
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.workflows import approvals
 from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
@@ -228,61 +227,40 @@ class Bot:
         parts = text.split()
         if len(parts) != 2:
             return f"Usage: {parts[0]} <approval id>"
-        outcome = await self.executor.decide(parts[1], approve=approve)
-        if outcome == "stale":
-            return "That approval is no longer valid (used, expired, edited or policy changed)."
-        if outcome == "rejected":
-            return "Rejected. Nothing will be sent."
-        action_id = await self.db.call(
-            lambda c: c.execute(
-                "SELECT action_id FROM approvals WHERE id=?", (parts[1],)
-            ).fetchone()[0]
-        )
-        reasons = await self.executor.run(action_id)
-        if reasons:
-            return f"Approved, but blocked: {', '.join(reasons)}. Nothing was sent."
-        _, state = await self.db.action(action_id)
-        return f"Dispatched once. Outcome: {state}."
+        return await approvals.decide(self.db, self.executor, parts[1], approve)
 
     async def _policy(self, arguments: list[str]) -> str:
         current = await self.db.policy()
-        summary = (
-            f"mode={current.mode} applications/day={current.application_cap} "
-            f"messages/day={current.communication_cap}"
-        )
+        summary = approvals.describe(current)
         if not arguments:
             return summary
         confirmed = arguments[-1] == "confirm"
         change = arguments[:-1] if confirmed else arguments
-        update: dict[str, object]
-        if len(change) == 2 and change[0] == "mode" and change[1] in ("draft_only", "reviewed"):
-            update = {"mode": change[1]}
-        elif (
-            len(change) == 3
-            and change[0] == "cap"
-            and change[1] in ("application", "communication")
-            and change[2].isdecimal()
-        ):
-            ceiling = (
-                MAX_DAILY_APPLICATIONS if change[1] == "application" else MAX_DAILY_COMMUNICATIONS
-            )
-            if int(change[2]) > ceiling:
-                return f"The hard ceiling for {change[1]} is {ceiling} per day."
-            update = {f"{change[1]}_cap": int(change[2])}
-        else:
-            return "Usage: /policy [mode draft_only|reviewed | cap application|communication N]"
-        proposed = current.model_copy(update={**update, "revision": current.revision + 1})
+        try:
+            if len(change) == 2 and change[0] == "mode" and change[1] in ("draft_only", "reviewed"):
+                proposed = approvals.propose(current, mode=change[1])
+            elif (
+                len(change) == 3
+                and change[0] == "cap"
+                and change[1] in ("application", "communication")
+                and change[2].isdecimal()
+            ):
+                count = int(change[2])
+                proposed = (
+                    approvals.propose(current, application_cap=count)
+                    if change[1] == "application"
+                    else approvals.propose(current, communication_cap=count)
+                )
+            else:
+                return "Usage: /policy [mode draft_only|reviewed | cap application|communication N]"
+        except ValueError as exc:
+            return str(exc)
         if not confirmed:
             return (
-                f"Before: {summary}\nAfter: mode={proposed.mode} "
-                f"applications/day={proposed.application_cap} "
-                f"messages/day={proposed.communication_cap}\n"
+                f"Before: {summary}\nAfter: {approvals.describe(proposed)}\n"
                 "Pending actions will need fresh approval. Repeat the command with 'confirm'."
             )
-        await self.db.save_policy(
-            proposed.model_copy(update={"paused": False, "restore_audit_required": False}),
-            current.revision,
-        )
+        await approvals.apply(self.db, proposed, current)
         return (
             f"Policy updated to revision {proposed.revision}. Pending approvals were invalidated."
         )
@@ -290,10 +268,11 @@ class Bot:
     async def _resolve(self, arguments: list[str]) -> str:
         if len(arguments) < 2 or arguments[1] not in ("success", "none"):
             return "Usage: /resolve <action id> success|none <evidence note>"
-        if len(arguments) < 3 or not arguments[2].strip():
+        if len(arguments) < 3:
             return "An evidence note is required: say what you inspected."
-        done = await self.db.resolve_unknown(arguments[0], arguments[1] == "success", arguments[2])
-        return "Recorded as your attestation." if done else "No unknown action with that id."
+        return await approvals.resolve(
+            self.db, arguments[0], arguments[1] == "success", arguments[2]
+        )
 
     async def _prompt(self) -> str:
         return await self.onboarding.prompt()
@@ -330,9 +309,16 @@ async def poll_forever(
     *,
     once: bool = False,
     backoff: float = 5.0,
+    stop_when_unpaired: TelegramStore | None = None,
 ) -> None:
-    """Poll until asked to stop. Network errors back off and retry instead of ending the bot."""
+    """Poll until asked to stop. Network errors back off and retry instead of ending the bot.
+
+    With `stop_when_unpaired`, polling also ends once nobody is paired and no pairing code is
+    waiting (an expired code, or `unpair`), so a stranger's messages are not even fetched.
+    """
     while not stop.is_set():
+        if stop_when_unpaired is not None and not await stop_when_unpaired.polling_allowed(now()):
+            return
         polling = asyncio.ensure_future(poll_once(bot, api))
         waiting = asyncio.ensure_future(stop.wait())
         await asyncio.wait({polling, waiting}, return_when=asyncio.FIRST_COMPLETED)

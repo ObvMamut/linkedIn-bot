@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal
+from urllib.parse import quote
 
 from linkedin_bot.adapters.ats import Board
 from linkedin_bot.adapters.linkedin.pages import Parsed
@@ -40,6 +41,12 @@ LANGUAGES = ("en", "fr", "de", "es", "it", "pl")
 JOB_DAYS = 60
 NOT_ENABLED = "LinkedIn is not enabled on this installation."
 BoardFinder = Callable[[str], Awaitable[tuple[str, str] | None]]
+BOARD_ROOTS = {
+    "greenhouse": "https://boards.greenhouse.io/{slug}",
+    "lever": "https://jobs.lever.co/{slug}",
+    "ashby": "https://jobs.ashbyhq.com/{slug}",
+}
+COMPANY_SEARCH = "https://www.linkedin.com/search/results/companies/?keywords="
 
 
 @dataclass(frozen=True)
@@ -317,6 +324,23 @@ class Operations:
         name = item.name or item.title
         await self.store.pin(kind, item.url, name)
         return next(p for p in await self.store.pins(kind) if p.url == item.url)
+
+    async def pin_company(self, item: ResultItem) -> Pin:
+        """Pin the firm behind a posting. A board posting links (and schedules) its board."""
+        if not item.company:
+            raise ValueError("no_company")
+        root = BOARD_ROOTS.get(item.source or "")
+        if root is not None and item.source is not None:
+            url = root.format(slug=item.company)
+            await self.store.pin("firm", url, item.company)
+            await self.store.link_board(url, item.source, item.company)
+            scheduled = {str(w["workflow"]) for w in await self.db.work_items()}
+            if f"ats:{item.source}:{item.company}" not in scheduled:
+                await self.schedule_board(item.source, item.company, due_now=False)
+        else:
+            url = f"{COMPANY_SEARCH}{quote(item.company, safe='')}"
+            await self.store.pin("firm", url, item.company)
+        return next(p for p in await self.store.pins("firm") if p.url == url)
 
     async def schedule_board(self, provider: str, slug: str, *, due_now: bool = True) -> Board:
         board = Board.model_validate({"provider": provider, "slug": slug})

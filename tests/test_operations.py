@@ -232,3 +232,48 @@ def test_services_with_telegram_share_one_operations_object(tmp_path):
             await db.close()
 
     asyncio.run(main())
+
+
+def test_cockpit_polling_waits_for_a_pairing_and_stops_after_unpairing(tmp_path):
+    class Poller(FakeAPI):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        async def get_updates(self, offset, poll_seconds=30):
+            self.polls += 1
+            await asyncio.sleep(0.01)
+            return []
+
+    async def main():
+        db = Database(tmp_path)
+        try:
+            await db.open()
+            api = Poller()
+
+            @asynccontextmanager
+            async def opener():
+                yield UIConnector()
+
+            config = Config.model_validate({"data_dir": str(tmp_path)})
+            services = Services(config, db, telegram=api, opener=opener)
+            services.pairing_check_seconds = 0.01
+            stop = asyncio.Event()
+            services.start_background(stop, poll_telegram=True)
+            await asyncio.sleep(0.1)
+            assert api.polls == 0  # nobody paired, no code waiting: nothing is fetched
+            store = TelegramStore(db)
+            await store.begin_pairing(now())
+            await asyncio.sleep(0.1)
+            assert api.polls > 0
+            await db.call(lambda c: c.execute("UPDATE telegram_binding SET code_expires_at=NULL"))
+            await asyncio.sleep(0.1)
+            seen = api.polls
+            await asyncio.sleep(0.1)
+            assert api.polls == seen  # the code is gone again: polling stopped
+            stop.set()
+            await services.aclose()
+        finally:
+            await db.close()
+
+    asyncio.run(main())

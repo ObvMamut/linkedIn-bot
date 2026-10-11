@@ -27,17 +27,15 @@ from linkedin_bot.adapters.linkedin.session import (
 )
 from linkedin_bot.adapters.ollama import OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
-from linkedin_bot.adapters.telegram import TOKEN_ENV
 from linkedin_bot.domain.models import identifier, now
 from linkedin_bot.runtime.config import Config, load_config
+from linkedin_bot.runtime.doctor import doctor
 from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
 from linkedin_bot.runtime.privacy import BoundaryError, configure_logging
 from linkedin_bot.runtime.services import Services
 from linkedin_bot.storage.database import Database, RevisionConflict, SchemaError
-from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
-from linkedin_bot.storage.workspace import WorkspaceStore
 from linkedin_bot.workflows.maintenance import Maintenance
 from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.telegram_bot import poll_forever
@@ -83,6 +81,15 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "serve",
         help="Foreground process: Telegram, board collection, and the opt-in digest and alerts",
+    )
+    tui = commands.add_parser(
+        "tui", help="Terminal cockpit: everything serve does, plus every view and setting"
+    )
+    tui.add_argument("--no-telegram", action="store_true", help="Do not poll Telegram")
+    tui.add_argument(
+        "--no-background",
+        action="store_true",
+        help="No board collection, digest, alerts or upkeep while the cockpit is open",
     )
     linkedin = commands.add_parser("linkedin", help="Read-only LinkedIn session tools")
     linkedin.add_argument("action", choices=("login", "status", "timing"))
@@ -256,6 +263,16 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                 emit({"unpaired": await TelegramStore(database).unpair()})
             elif args.command == "prune":
                 emit(await Maintenance(database, config.timezone).run())
+            elif args.command == "tui":
+                from linkedin_bot.tui.app import run_tui  # Textual loads only when asked for
+
+                await run_tui(
+                    database,
+                    config=config,
+                    telegram=not args.no_telegram,
+                    background=not args.no_background,
+                )
+                emit({"stopped": True})
             elif args.command == "serve":
                 await telegram_foreground(database, config, once=False, background=True)
                 emit({"stopped": True})
@@ -271,41 +288,6 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
             await database.close()
             logging.info("", extra={"event": "runtime_stopped"})
     return 0
-
-
-async def doctor(
-    database: Database, config: Config, recovery: dict[str, int], artifacts: dict[str, int]
-) -> dict[str, object]:
-    """What is configured and what state it is in. Names and counts only, never content."""
-    status = await database.status()
-    linkedin_state, last_ok = await LinkedInStore(database).state()
-    digest = await WorkspaceStore(database).digest()
-    work = cast(list[dict[str, object]], status["work"])
-    states: dict[str, int] = {}
-    for item in work:
-        states[str(item["state"])] = states.get(str(item["state"]), 0) + 1
-    budget = Limiter(budget=BudgetFile(config.root)).usage()
-    return {
-        **status,
-        "work_states": states,
-        "policy": (await database.policy()).model_dump(),
-        "recovery": recovery,
-        **artifacts,
-        "capabilities": {
-            "linkedin": {"session": linkedin_state, "last_ok": last_ok, "budget": budget},
-            "telegram": "paired" if await TelegramStore(database).binding() else "unpaired",
-            "telegram_token": "set" if os.environ.get(TOKEN_ENV) else "missing",
-            "inference": config.inference.model or "not_configured",
-            "digest": {
-                "enabled": digest.enabled,
-                "time": digest.local_time,
-                "board_alerts": digest.alerts_boards,
-                "message_alerts": digest.alerts_messages,
-            },
-            "employer_effects": "disabled",
-            "deepseek": "disabled",
-        },
-    }
 
 
 async def foreground(database: Database, *, once: bool) -> None:

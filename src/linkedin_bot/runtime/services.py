@@ -6,7 +6,6 @@ the database, the browser profile and the LinkedIn page budget. The caller opens
 """
 
 import asyncio
-import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
@@ -96,6 +95,7 @@ class Services:
             notifiers=notifiers or [],
         )
         self.maintenance = Maintenance(database, config.timezone)
+        self.pairing_check_seconds = 15.0
         self.tasks: list[asyncio.Task[None]] = []
 
     @classmethod
@@ -123,11 +123,17 @@ class Services:
             self.tasks.append(asyncio.create_task(self._poll(stop)))
 
     async def _poll(self, stop: asyncio.Event) -> None:
+        """Poll while paired or while a pairing code waits; otherwise check back later."""
         assert self.bot is not None and self.api is not None
-        if not await TelegramStore(self.db).polling_allowed(now()):
-            logging.info("", extra={"event": "telegram_not_paired"})
-            return
-        await poll_forever(self.bot, self.api, stop)
+        store = TelegramStore(self.db)
+        while not stop.is_set():
+            if await store.polling_allowed(now()):
+                await poll_forever(self.bot, self.api, stop, stop_when_unpaired=store)
+                continue
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.pairing_check_seconds)
+            except TimeoutError:
+                pass
 
     async def telegram_ready(self) -> bool:
         return self.api is not None and await TelegramStore(self.db).polling_allowed(now())

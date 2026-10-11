@@ -1,0 +1,228 @@
+/* The cockpit's look. Colours come from the active theme (Ctrl+P, "Theme"). */
+
+#statusbar {
+    height: 1;
+    padding: 0 1;
+    background: $boost;
+    color: $text-muted;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+TabPane {
+    padding: 0 1;
+}
+
+View {
+    height: 1fr;
+}
+
+.toolbar {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.toolbar > Input {
+    width: 1fr;
+}
+
+.toolbar > Select {
+    width: 26;
+}
+
+.toolbar > Button {
+    margin-right: 1;
+}
+
+.toolbar > Checkbox {
+    width: auto;
+}
+
+.split {
+    height: 1fr;
+}
+
+.split > DataTable {
+    width: 3fr;
+    height: 1fr;
+}
+
+.detail {
+    width: 2fr;
+    height: 1fr;
+    border: round $primary 40%;
+    padding: 0 1;
+}
+
+.hint {
+    color: $text-muted;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.section {
+    margin: 1 0 0 0;
+    text-style: bold;
+    color: $accent;
+}
+
+.panel {
+    height: 1fr;
+    border: round $primary 30%;
+    padding: 0 1;
+}
+
+.panel-title {
+    text-style: bold;
+    color: $accent;
+}
+
+#cards {
+    grid-size: 4 2;
+    grid-gutter: 1 2;
+    height: 10;
+    margin: 0 0 1 0;
+}
+
+.card {
+    border: round $primary 40%;
+    padding: 0 1;
+    height: 4;
+}
+
+.card-label {
+    color: $text-muted;
+}
+
+.card-value {
+    text-style: bold;
+    color: $text;
+}
+
+#dashboard-panels {
+    height: 1fr;
+}
+
+#dashboard-panels > .panel {
+    width: 1fr;
+}
+
+.actions {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.actions > Button {
+    margin-right: 1;
+}
+
+.field {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.field-label {
+    width: 34;
+    padding: 1 1 0 0;
+}
+
+.field > Input {
+    width: 1fr;
+}
+
+.field > Input.short {
+    width: 12;
+}
+
+.field > Checkbox {
+    width: auto;
+}
+
+#priorities {
+    width: 40;
+    height: 8;
+}
+
+.priority-buttons {
+    width: 30;
+    height: auto;
+}
+
+#interests {
+    height: 6;
+}
+
+#answer-cv {
+    height: 10;
+}
+
+#facts {
+    height: 14;
+}
+
+#pending, #unknown {
+    height: 8;
+}
+
+#searching, #loading-messages {
+    height: 3;
+}
+
+.document {
+    width: 100%;
+}
+
+/* Dialogs */
+ModalScreen {
+    align: center middle;
+}
+
+.modal {
+    width: 70;
+    height: auto;
+    max-height: 90%;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+.modal.wide {
+    width: 100;
+}
+
+.modal.tall {
+    height: 90%;
+}
+
+.modal-title {
+    text-style: bold;
+    margin: 0 0 1 0;
+}
+
+.modal-text {
+    margin: 0 0 1 0;
+}
+
+.modal > TextArea {
+    height: 14;
+}
+
+.modal-buttons {
+    height: auto;
+    margin: 1 0 0 0;
+    align-horizontal: right;
+}
+
+.modal-buttons > Button {
+    margin-left: 1;
+}
+
+#onboarding {
+    height: auto;
+}
+
+#onboarding > Input {
+    margin: 0 0 1 0;
+}

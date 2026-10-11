@@ -796,6 +796,78 @@ class Database:
 
         await self.call(write)
 
+    async def work_items(self) -> tuple[dict[str, object], ...]:
+        """The work queue for status screens: names, states and times only."""
+
+        def read(connection: sqlite3.Connection) -> tuple[dict[str, object], ...]:
+            names = (
+                "workflow",
+                "state",
+                "due_at",
+                "interval_seconds",
+                "recurring",
+                "attempts",
+                "coverage",
+                "reason",
+            )
+            rows = connection.execute(
+                "SELECT workflow,state,due_at,interval_seconds,recurring,attempts,coverage,"
+                "reason_code FROM work_items ORDER BY due_at,workflow"
+            )
+            return tuple(dict(zip(names, row, strict=True)) for row in rows)
+
+        return await self.call(read)
+
+    async def run_work_now(self, workflow: str, at: datetime) -> bool:
+        """Make a pending or blocked read due now (a blocked one gets a fresh retry budget)."""
+        stamp = at.astimezone(UTC).isoformat()
+        cursor = await self.call(
+            lambda c: c.execute(
+                "UPDATE work_items SET state='pending',due_at=?,retry_count=0,reason_code=NULL "
+                "WHERE workflow=? AND state IN ('pending','blocked','completed')",
+                (stamp, workflow),
+            )
+        )
+        return bool(cursor.rowcount)
+
+    async def set_work_interval(self, workflow: str, interval_seconds: int) -> bool:
+        if interval_seconds < 1800:
+            raise ValueError("interval_too_short")
+        cursor = await self.call(
+            lambda c: c.execute(
+                "UPDATE work_items SET interval_seconds=? WHERE workflow=?",
+                (interval_seconds, workflow),
+            )
+        )
+        return bool(cursor.rowcount)
+
+    async def delete_work(self, workflow: str) -> bool:
+        cursor = await self.call(
+            lambda c: c.execute(
+                "DELETE FROM work_items WHERE workflow=? AND state!='running'", (workflow,)
+            )
+        )
+        return bool(cursor.rowcount)
+
+    async def artifacts(self) -> tuple[Artifact, ...]:
+        """Every stored artifact manifest, newest first."""
+        rows = await self.call(
+            lambda c: c.execute("SELECT snapshot FROM artifacts ORDER BY rowid DESC").fetchall()
+        )
+        return tuple(Artifact.model_validate_json(row[0]) for row in rows)
+
+    async def artifact_text(self, artifact: Artifact) -> str:
+        """The artifact's content after checking it still matches its recorded checksum."""
+
+        def read(_: sqlite3.Connection) -> str:
+            path = safe_file(self.root, artifact.relative_path)
+            content = path.read_bytes()
+            if digest(content) != artifact.sha256:
+                raise BoundaryError("artifact_checksum")
+            return content.decode()
+
+        return await self.call(read)
+
     async def save_observations(self, items: Sequence[SourceObservation]) -> None:
         """Record postings seen outside a scheduled read (for example a LinkedIn jobs search)."""
 
