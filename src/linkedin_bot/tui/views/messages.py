@@ -16,8 +16,8 @@ class Messages(View):
     AUTO_REFRESH = False
     BINDINGS = [Binding("r", "load(True)", "Refresh")]
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.conversations: tuple[Conversation, ...] = ()
 
     def compose(self) -> ComposeResult:

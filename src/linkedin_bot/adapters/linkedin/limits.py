@@ -38,7 +38,7 @@ class BudgetFile:
         self.path = safe_file(root, "linkedin-budget.json")
 
     @contextlib.contextmanager
-    def locked(self) -> Iterator[dict[str, Any]]:
+    def locked(self, *, write: bool = True) -> Iterator[dict[str, Any]]:
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -54,6 +54,8 @@ class BudgetFile:
             except ValueError, TypeError, AttributeError:
                 logging.warning("", extra={"event": "linkedin_budget_unreadable"})
             yield state
+            if not write:
+                return
             payload = json.dumps(
                 {"loads": state["loads"][-DAILY:], "cooldown_until": state["cooldown_until"]}
             ).encode()
@@ -65,7 +67,7 @@ class BudgetFile:
             os.close(fd)
 
     def snapshot(self) -> dict[str, Any]:
-        with self.locked() as state:
+        with self.locked(write=False) as state:
             return {"loads": list(state["loads"]), "cooldown_until": state["cooldown_until"]}
 
 

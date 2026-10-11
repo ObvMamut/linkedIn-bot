@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 
 from linkedin_bot.domain.models import (
     ActionResult,
@@ -54,7 +54,7 @@ class PostingRecord:
     observation: SourceObservation
     first_seen: datetime
     last_seen: datetime
-    status: str = "new"
+    status: TrackerStatus = "new"
     note: str = ""
     status_at: datetime | None = None
 
@@ -939,7 +939,7 @@ class Database:
                     observation=SourceObservation.model_validate_json(snapshot),
                     first_seen=datetime.fromisoformat(first_seen),
                     last_seen=datetime.fromisoformat(last_seen),
-                    status=status or "new",
+                    status=cast(TrackerStatus, status or "new"),  # CHECK constrains it
                     note=note or "",
                     status_at=datetime.fromisoformat(status_at) if status_at else None,
                 )

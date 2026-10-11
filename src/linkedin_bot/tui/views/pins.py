@@ -23,8 +23,8 @@ class Pins(View):
         Binding("delete", "unpin", "Unpin"),
     ]
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.pins: tuple[Pin, ...] = ()
         self.work: dict[str, dict[str, object]] = {}
 

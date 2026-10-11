@@ -42,8 +42,8 @@ class Jobs(View):
         Binding("slash", "filter", "Filter", show=False),
     ]
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.items: list[ResultItem] = []
         self.sort = "score"
         self.reverse = False
@@ -190,7 +190,8 @@ class Jobs(View):
         )
         if note is None:
             return
-        status: TrackerStatus = "interested" if item.status == "new" else item.status  # type: ignore[assignment]
+        # A note on an untracked posting marks it interested; otherwise the status stays.
+        status: TrackerStatus = "interested" if item.status == "new" else item.status
         await self.services.ops.set_status(item.source, item.external_id, status, note[:1000])
         await self.reload()
 

@@ -22,8 +22,8 @@ class Boards(View):
         Binding("delete", "delete", "Delete"),
     ]
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.work: list[dict[str, object]] = []
 
     def compose(self) -> ComposeResult:

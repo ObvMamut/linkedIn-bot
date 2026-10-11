@@ -36,8 +36,8 @@ KIND_LABELS = {
 
 
 class Drafts(View):
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.artifacts: tuple[Artifact, ...] = ()
         self.text = ""
 

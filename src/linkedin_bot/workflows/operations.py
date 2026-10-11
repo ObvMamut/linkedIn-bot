@@ -66,7 +66,7 @@ class ResultItem:
     reasons: tuple[str, ...] = ()
     gaps: tuple[str, ...] = ()
     matched: bool = True
-    status: str = "new"
+    status: TrackerStatus = "new"
     note: str = ""
     first_seen: datetime | None = None
     description: str | None = None
@@ -208,10 +208,6 @@ class Operations:
         self.store = WorkspaceStore(database)
 
     # ---- postings --------------------------------------------------------------------
-    async def job_matches(self, days: int = JOB_DAYS) -> list[Match]:
-        recent = await self.db.opportunities(since=now() - timedelta(days=days))
-        return rank(recent, await self.db.preferences(), await self.store.pinned_tokens())
-
     async def ranked_jobs(
         self,
         days: int = JOB_DAYS,

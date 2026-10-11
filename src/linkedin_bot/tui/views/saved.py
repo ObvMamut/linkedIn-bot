@@ -22,8 +22,8 @@ class Saved(View):
         Binding("o", "open", "Open result"),
     ]
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.saved: tuple[SavedSearch, ...] = ()
         self.new_items: list[ResultItem] = []
 

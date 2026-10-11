@@ -24,8 +24,8 @@ class Search(View):
         Binding("slash", "focus_query", "Query", show=False),
     ]
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.items: list[ResultItem] = []
         self.kind: SearchKind = "jobs"
         self.query_text = ""

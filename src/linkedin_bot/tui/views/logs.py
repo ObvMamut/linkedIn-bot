@@ -22,8 +22,8 @@ def line(event: Event) -> str:
 
 
 class Logs(View):
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.serial = 0
 
     def compose(self) -> ComposeResult:
