@@ -130,6 +130,15 @@ async def edit(database: Database, fact_id: str, value: str) -> CandidateFact:
     return await revise(database, fact_id, value=value, status="unconfirmed")
 
 
+async def add_typed_fact(database: Database, text: str) -> CandidateFact:
+    """`kind: text` (or just text, kept as `other`), confirmed because you typed it."""
+    kind, separator, value = text.partition(":")
+    kind = kind.strip().lower().replace(" ", "_")
+    if separator and kind in FACT_KINDS:
+        return await add(database, kind, value)
+    return await add(database, "other", text)
+
+
 def build_prompt(cv_text: str) -> str:
     return (
         "List short, factual statements about the candidate as JSON with a `facts` array of "

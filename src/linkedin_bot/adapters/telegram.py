@@ -173,6 +173,13 @@ class HttpTelegram:
             return  # the screen is already showing exactly this
         raise BoundaryError("telegram_edit_failed")
 
+    async def set_commands(self, commands: list[tuple[str, str]]) -> None:
+        """The command list Telegram shows in its menu button."""
+        body = {"commands": [{"command": c, "description": d[:256]} for c, d in commands]}
+        response = await self._call("setMyCommands", body)
+        if response.status_code != 200:
+            raise BoundaryError("telegram_http_status")
+
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         await self._call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 

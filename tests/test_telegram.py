@@ -680,3 +680,30 @@ def test_long_replies_are_split_on_line_boundaries_with_buttons_on_the_last_part
 
     assert asyncio.run(go()) == len(parts)
     assert [("reply_markup" in call) for call in calls] == [False] * (len(parts) - 1) + [True]
+
+
+def test_command_menu_is_registered_with_telegram():
+    import json
+
+    import httpx
+
+    from linkedin_bot.adapters.telegram import HttpTelegram
+    from linkedin_bot.workflows.telegram_bot import COMMANDS, HELP
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path.rsplit("/", 1)[1], json.loads(request.content)))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async def go():
+        api = HttpTelegram("123:token", transport=httpx.MockTransport(handler))
+        await api.set_commands(list(COMMANDS))
+        await api.close()
+
+    asyncio.run(go())
+    method, body = calls[0]
+    assert method == "setMyCommands"
+    names = [c["command"] for c in body["commands"]]
+    assert "jobs" in names and "facts" in names
+    assert all(f"/{name}" in HELP for name in names)

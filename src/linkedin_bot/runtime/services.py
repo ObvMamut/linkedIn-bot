@@ -6,6 +6,7 @@ the database, the browser profile and the LinkedIn page budget. The caller opens
 """
 
 import asyncio
+import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
@@ -30,7 +31,7 @@ from linkedin_bot.workflows.monitor import run_one
 from linkedin_bot.workflows.onboarding import Onboarding
 from linkedin_bot.workflows.operations import BoardFinder, Operations
 from linkedin_bot.workflows.serve import Notifier, Scheduler, monitor_loop, run_scheduler
-from linkedin_bot.workflows.telegram_bot import Bot, poll_forever
+from linkedin_bot.workflows.telegram_bot import COMMANDS, Bot, poll_forever
 
 Opener = Callable[[], AbstractAsyncContextManager[Connector]]
 
@@ -126,6 +127,7 @@ class Services:
         """Poll while paired or while a pairing code waits; otherwise check back later."""
         assert self.bot is not None and self.api is not None
         store = TelegramStore(self.db)
+        await self.register_commands()
         while not stop.is_set():
             if await store.polling_allowed(now()):
                 await poll_forever(self.bot, self.api, stop, stop_when_unpaired=store)
@@ -134,6 +136,15 @@ class Services:
                 await asyncio.wait_for(stop.wait(), timeout=self.pairing_check_seconds)
             except TimeoutError:
                 pass
+
+    async def register_commands(self) -> None:
+        """Best effort: list the commands in Telegram's menu. Failure changes nothing else."""
+        if not isinstance(self.api, HttpTelegram):
+            return
+        try:
+            await self.api.set_commands(list(COMMANDS))
+        except Exception:
+            logging.warning("", extra={"event": "telegram_commands_failed"})
 
     async def telegram_ready(self) -> bool:
         return self.api is not None and await TelegramStore(self.db).polling_allowed(now())

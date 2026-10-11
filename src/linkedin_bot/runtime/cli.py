@@ -325,6 +325,7 @@ async def telegram_foreground(
     try:
         if not await services.bot.store.polling_allowed(now()):
             raise BoundaryError("not_paired_run_pair_first")
+        await services.register_commands()
         if background:
             # Opt-in work: board collection every time something is due, plus the digest,
             # alerts and daily upkeep (which do nothing until switched on in Settings).

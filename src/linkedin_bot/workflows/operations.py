@@ -76,15 +76,26 @@ class ResultItem:
     def key(self) -> str:
         return self.url
 
+    @property
+    def posting_id(self) -> str | None:
+        """`source:external_id` for postings (what /prepare and the tracker use)."""
+        if self.kind != "jobs" or self.source is None or self.external_id is None:
+            return None
+        return f"{self.source}:{self.external_id}"
+
     def card(self) -> dict[str, Any]:
         """The shape the Telegram card screens and tokens use."""
-        return {
+        card: dict[str, Any] = {
             "title": self.title,
             "lines": list(self.lines),
             "url": self.url,
             "key": self.key,
             "name": self.name,
         }
+        if self.posting_id is not None:
+            card["posting"] = self.posting_id
+            card["status"] = self.status
+        return card
 
 
 @dataclass(frozen=True)

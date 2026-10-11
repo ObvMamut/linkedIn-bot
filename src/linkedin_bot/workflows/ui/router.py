@@ -9,20 +9,24 @@ from dataclasses import dataclass
 from typing import Any
 
 from linkedin_bot.adapters.linkedin.pages import Parsed
+from linkedin_bot.adapters.public_http import AdapterError
 from linkedin_bot.adapters.telegram import TelegramAPI
 from linkedin_bot.domain.models import SearchPreferences
 from linkedin_bot.domain.workspace import Pin
 from linkedin_bot.runtime.privacy import BoundaryError
-from linkedin_bot.storage.database import Database
+from linkedin_bot.storage.database import Database, TrackerStatus
 from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.workspace import WorkspaceStore
+from linkedin_bot.workflows import facts
 from linkedin_bot.workflows.digest import DigestService
+from linkedin_bot.workflows.facts import add_typed_fact
 from linkedin_bot.workflows.linkedin_commands import Connector, LinkedInCommands
+from linkedin_bot.workflows.materials import Generator, draft_cover_letter
+from linkedin_bot.workflows.onboarding import baseline_cv
 from linkedin_bot.workflows.operations import (
     BoardFinder,
     Operations,
     SearchKind,
-    job_item,
     search_kind,
     split_items,
 )
@@ -68,9 +72,11 @@ class UI:
         digest_service: DigestService | None = None,
         board_interval_seconds: int = BOARD_INTERVAL_SECONDS,
         operations: Operations | None = None,
+        generator: Generator | None = None,
     ) -> None:
         self.db, self.api, self.linkedin, self.finder = database, api, linkedin, board_finder
-        self.llm_enabled = llm_enabled
+        self.generator = generator
+        self.llm_enabled = llm_enabled or generator is not None
         self.digest_service = digest_service
         self.ops = operations or Operations(
             database, linkedin, board_finder, board_interval_seconds
@@ -83,6 +89,18 @@ class UI:
     async def open_menu(self, chat_id: int) -> None:
         await self.store.clear_awaiting()
         await self.show(Ctx(chat_id, None), screens.main_menu())
+
+    async def open(self, chat_id: int, data: str) -> None:
+        """A typed shortcut (/jobs, /pins, ...) opens the same screen a button would."""
+        await self.store.clear_awaiting()
+        ctx = Ctx(chat_id, None)
+        try:
+            toast = await self.dispatch(ctx, data)
+        except BoundaryError, ValueError, LookupError:
+            logging.warning("", extra={"event": "ui_refused"})
+            toast = "That did not work. Try again from the menu."
+        if toast and ctx.message_id is None:
+            await self.api.send_message(chat_id, toast)
 
     async def on_callback(
         self, chat_id: int, message_id: int | None, callback_id: str, data: str
@@ -193,6 +211,24 @@ class UI:
             return "Deleted"
         elif head in ("pd", "up", "nt", "tg", "lb"):
             return await self.pin_action(ctx, head, rest)
+        elif data == "m:facts":
+            await self.facts(ctx)
+        elif head == "fc":
+            return await self.fact_decision(ctx, rest)
+        elif data == "fa":
+            await self.store.set_awaiting("fact", {"msg": ctx.message_id})
+            await self.show(
+                ctx,
+                screens.prompt(
+                    "Send the fact as kind: text, e.g. skill: Python, 3 years. Kinds: "
+                    + ", ".join(facts.FACT_KINDS)
+                    + ". It is saved as confirmed."
+                ),
+            )
+        elif data == "fx":
+            return await self.extract_facts(ctx)
+        elif head == "tk":
+            return await self.track(ctx, rest)
         else:
             return "Unknown button."
         return None
@@ -228,7 +264,7 @@ class UI:
         )
 
     async def jobs(self, ctx: Ctx) -> None:
-        matches = await self.ops.job_matches()
+        matches = await self.ops.ranked_jobs()
         if not matches:
             await self.show(
                 ctx,
@@ -238,7 +274,7 @@ class UI:
                 ),
             )
             return
-        items = [job_item(m).card() for m in matches[:30]]
+        items = [item.card() for item in matches[:30]]
         await self.show_results(ctx, "jobs", "", items, header="💼 Best matches for your settings")
 
     # ---- search and results -------------------------------------------------------------
@@ -267,6 +303,7 @@ class UI:
             saved_id=payload["saved_id"],
             # "Best matches" has no query to rerun, so it cannot become a saved search.
             can_save=payload["kind"] in ALL_KINDS and bool(payload["query"]),
+            draftable=self.generator is not None,
         )
 
     async def page(self, ctx: Ctx, rest: str) -> str | None:
@@ -340,6 +377,80 @@ class UI:
             payload["kind"], payload["query"], [item["key"] for item in payload["items"]]
         )
         return "Saved. Rerun it from 💾 Saved to see only new results."
+
+    # ---- tracker and drafts -------------------------------------------------------------
+    async def track(self, ctx: Ctx, rest: str) -> str | None:
+        token, _, tail = rest.partition(":")
+        index, _, action = tail.partition(":")
+        payload = self.tokens.get(token)
+        if payload is None or not index.isdecimal() or int(index) >= len(payload["items"]):
+            return EXPIRED
+        item = payload["items"][int(index)]
+        if not item.get("posting"):
+            return "Only postings can be tracked."
+        source, _, external_id = str(item["posting"]).partition(":")
+        if action == "w":
+            return await self.draft(ctx, source, external_id)
+        statuses: dict[str, TrackerStatus] = {"i": "interested", "a": "applied", "x": "dismissed"}
+        status = statuses.get(action)
+        if status is None:
+            return "Unknown button."
+        if item.get("status") == status:
+            status = "new"  # pressing the same status again clears it
+        await self.ops.set_status(source, external_id, status)
+        item["status"] = status
+        await self.show(ctx, self.render_card(payload, token, int(index)))
+        return "Cleared." if status == "new" else f"Marked {status}."
+
+    async def draft(self, ctx: Ctx, source: str, external_id: str) -> str | None:
+        if self.generator is None:
+            return "No local model is configured (inference.model)."
+        record = await self.db.posting(source, external_id)
+        if record is None:
+            return "That posting is gone."
+        await self.ack(ctx, "Drafting with your local model…")
+        await self.api.send_chat_action(ctx.chat_id, "typing")
+        try:
+            artifact = await draft_cover_letter(self.db, self.generator, record.observation)
+        except AdapterError as exc:
+            await self.api.send_message(
+                ctx.chat_id, f"Draft not produced: {exc.code}. Nothing was saved."
+            )
+            return None
+        text = await self.db.artifact_text(artifact)
+        await self.api.send_message(ctx.chat_id, f"Draft for review (not sent anywhere):\n\n{text}")
+        return None
+
+    # ---- facts ----------------------------------------------------------------------------
+    async def facts(self, ctx: Ctx) -> None:
+        await self.show(ctx, screens.facts_screen(await facts.facts(self.db), self.llm_enabled))
+
+    async def fact_decision(self, ctx: Ctx, rest: str) -> str:
+        fact_id, _, decision = rest.rpartition(":")
+        if decision == "c":
+            await facts.confirm(self.db, fact_id)
+        elif decision == "r":
+            await facts.reject(self.db, fact_id)
+        else:
+            return "Unknown button."
+        await self.facts(ctx)
+        return "Confirmed." if decision == "c" else "Rejected."
+
+    async def extract_facts(self, ctx: Ctx) -> str | None:
+        if self.generator is None:
+            return "No local model is configured (inference.model)."
+        profile = await self.db.profile()
+        cv = await baseline_cv(self.db)
+        if cv is None or profile.baseline_artifact_id is None:
+            return "Store your CV first (finish onboarding)."
+        await self.loading(ctx, "🤖 Reading your CV with the local model…")
+        try:
+            added = await facts.extract(self.db, self.generator, cv, profile.baseline_artifact_id)
+        except AdapterError as exc:
+            await self.facts(ctx)
+            return f"No facts proposed: {exc.code}."
+        await self.facts(ctx)
+        return f"{len(added)} fact(s) proposed. Confirm the true ones."
 
     # ---- pins ---------------------------------------------------------------------------
     async def pin_by_key(self, key: str) -> Pin | None:
@@ -512,5 +623,14 @@ class UI:
         elif kind == "interests":
             await self.ops.set_interests(text)
             await self.show(ctx, await self.settings_screen("interests"))
+        elif kind == "fact":
+            try:
+                await add_typed_fact(self.db, text)
+            except ValueError:
+                await self.show(
+                    ctx, screens.error_screen("A fact is 1 to 500 characters.", "m:facts")
+                )
+                return
+            await self.facts(ctx)
         else:
             await self.show(ctx, screens.main_menu())

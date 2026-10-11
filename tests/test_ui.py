@@ -442,3 +442,119 @@ def test_best_matches_cannot_be_saved_as_an_empty_search(tmp_path):
         assert any("Save search" in label for label, _ in flat(api.edits[-1][3]))
 
     ui_env(tmp_path, scenario)
+
+
+def test_job_cards_track_status_and_shortcuts_open_screens(tmp_path):
+    async def scenario(db, api, bot, conn):
+        await db.update_preferences(lambda p: p.model_copy(update={"roles": ("security",)}))
+        await db.save_observations(
+            [
+                SourceObservation(
+                    source="greenhouse",
+                    external_id="1",
+                    url="https://boards.greenhouse.io/beta/jobs/1",
+                    title="Security Engineer",
+                    company="beta",
+                    location="Berlin",
+                    content_hash=digest(b"1"),
+                )
+            ]
+        )
+        await say(bot, "/jobs")
+        markup = api.markups[-1]
+        await tap(bot, find(markup, "Applied"))
+        assert await db.status_counts() == {"applied": 1}
+        assert "Your status: applied" in api.edits[-1][2]
+        await tap(bot, find(api.edits[-1][3], "Applied"))  # pressing again clears it
+        assert await db.status_counts() == {}
+        await tap(bot, find(api.edits[-1][3], "Dismiss"))
+        assert await db.status_counts() == {"dismissed": 1}
+        assert not any("Draft" in label for label, _ in flat(api.edits[-1][3]))  # no model
+        await say(bot, "/jobs")  # dismissed postings are gone from the list
+        assert "No matches yet" in api.sent[-1][1]
+        await say(bot, "/settings")
+        assert "Settings" in api.sent[-1][1]
+        await say(bot, "/digest")
+        assert "Digest & alerts" in api.sent[-1][1]
+
+    ui_env(tmp_path, scenario)
+
+
+def test_facts_can_be_added_typed_confirmed_and_rejected(tmp_path):
+    from linkedin_bot.workflows import facts
+
+    async def scenario(db, api, bot, conn):
+        await say(bot, "/fact skill: Python, 3 years")
+        assert "confirmed skill fact" in api.sent[-1][1]
+        proposed = await facts.add(db, "education", "BSc 2025", confirmed=False)
+        await say(bot, "/facts")
+        text, markup = api.sent[-1][1], api.markups[-1]
+        assert "skill: Python, 3 years" in text and "⏳ education: BSc 2025" in text
+        await tap(bot, find(markup, "Confirm 2"))
+        assert (await facts.fact(db, proposed.id)).status == "confirmed"
+        text = api.edits[-1][2]
+        number = next(line.split(".")[0] for line in text.splitlines() if "skill: Python" in line)
+        await tap(bot, find(api.edits[-1][3], f"❌ {number}"))
+        confirmed = [f.value for f in await db.facts(confirmed_only=True)]
+        assert confirmed == ["BSc 2025"]
+        await tap(bot, "fa")
+        await say(bot, "language: Polish, native")
+        assert "language: Polish, native" in api.edits[-1][2]
+
+    ui_env(tmp_path, scenario)
+
+
+def test_drafting_from_a_card_uses_the_local_model(tmp_path):
+    import json
+
+    from linkedin_bot.domain.models import CandidateFact
+
+    class Model:
+        def __init__(self):
+            self.prompts = []
+
+        async def generate(self, prompt, schema):
+            self.prompts.append(prompt)
+            fact_id = prompt.split("[", 1)[1].split("]", 1)[0]
+            return json.dumps(
+                {"paragraphs": [{"text": "I write Python every day.", "fact_ids": [fact_id]}]}
+            )
+
+    async def main():
+        db = Database(tmp_path)
+        try:
+            await db.open()
+            api = FakeAPI()
+            model = Model()
+            bot = Bot(db, api, generator=model)
+            await bot.handle(update(1, f"/start {await TelegramStore(db).begin_pairing(now())}"))
+            await db.save_fact(
+                CandidateFact(
+                    kind="skill",
+                    value="Python every day",
+                    source_reference="test",
+                    status="confirmed",
+                    confirmed_at=now(),
+                )
+            )
+            await db.update_preferences(lambda p: p.model_copy(update={"roles": ("security",)}))
+            await db.save_observations(
+                [
+                    SourceObservation(
+                        source="greenhouse",
+                        external_id="1",
+                        url="https://boards.greenhouse.io/beta/jobs/1",
+                        title="Security Engineer",
+                        company="beta",
+                        content_hash=digest(b"1"),
+                    )
+                ]
+            )
+            await bot.handle(update(2, "/jobs"))
+            await bot.handle(callback(3, find(api.markups[-1], "Draft")))
+            assert "Draft for review" in api.sent[-1][1]
+            assert "I write Python every day." in api.sent[-1][1]
+        finally:
+            await db.close()
+
+    asyncio.run(main())

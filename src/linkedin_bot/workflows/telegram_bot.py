@@ -24,6 +24,7 @@ from linkedin_bot.storage.telegram import TelegramStore
 from linkedin_bot.workflows import approvals
 from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
+from linkedin_bot.workflows.facts import add_typed_fact
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
 from linkedin_bot.workflows.onboarding import PROMPTS, Onboarding
@@ -31,7 +32,37 @@ from linkedin_bot.workflows.operations import Operations
 from linkedin_bot.workflows.ui.router import BOARD_INTERVAL_SECONDS, UI, BoardFinder
 
 MODE_LINE = "Mode: draft_only. Nothing is sent to employers; application and message caps are 0."
+COMMANDS: tuple[tuple[str, str], ...] = (
+    ("menu", "Button menu: messages, search, pinned, jobs, saved, settings"),
+    ("jobs", "Best matches for your settings"),
+    ("pins", "Pinned firms and people"),
+    ("saved", "Saved searches"),
+    ("settings", "Ranking rules and priorities"),
+    ("digest", "Daily digest and alerts"),
+    ("facts", "Facts drafts may cite"),
+    ("status", "Mode and progress"),
+    ("opportunities", "Ranked matches as text"),
+    ("prepare", "Draft a cover letter: /prepare <source>:<id>"),
+    ("pending", "Actions waiting for you"),
+    ("policy", "Show or change mode and caps"),
+    ("li_status", "LinkedIn session state"),
+    ("li_messages", "Latest LinkedIn conversations"),
+    ("pause", "Pause background work"),
+    ("resume", "Resume reads (still draft only)"),
+    ("help", "Every command"),
+)
+SHORTCUTS = {
+    "/jobs": "m:jobs",
+    "/pins": "m:pins",
+    "/saved": "m:saved",
+    "/settings": "m:set",
+    "/digest": "set:digest",
+    "/facts": "m:facts",
+}
 HELP = (
+    "/menu open the button menu (messages, search, pinned, jobs, saved, settings, facts)\n"
+    "/jobs /pins /saved /settings /digest /facts open one screen directly\n"
+    "/fact kind: text add a confirmed fact, e.g. /fact skill: Python, 3 years\n"
     "/start resume onboarding\n/status show mode and progress\n"
     "/opportunities show ranked matches from collected postings\n"
     "/prepare <id> draft a cover letter for review\n"
@@ -39,7 +70,6 @@ HELP = (
     "/approve <id>, /reject <id> decide one proposed action\n"
     "/policy show or change mode and daily caps (changes need 'confirm')\n"
     "/resolve <action> success|none <note> record what you saw for an unknown outcome\n"
-    "/menu open the button menu (messages, search, pinned, jobs, saved, settings)\n"
     "/li_status /li_messages /li_search /li_profile read-only LinkedIn access\n"
     "/li_release free the browser profile (before `linkedin login`)\n"
     "/pause pause work\n/resume resume reads (not approval to send anything)\n/help this text"
@@ -76,6 +106,7 @@ class Bot:
             digest_service=digest_service or DigestService(database, linkedin, generator),
             board_interval_seconds=board_interval_seconds,
             operations=operations,
+            generator=generator,
         )
 
     async def handle(self, update: Update) -> None:
@@ -128,6 +159,12 @@ class Bot:
         command = text.split()[0] if text.startswith("/") else None
         if command == "/menu":
             await self.ui.open_menu(chat_id)
+            return
+        if command in SHORTCUTS:
+            await self.ui.open(chat_id, SHORTCUTS[command])
+            return
+        if command == "/fact":
+            await self._reply(chat_id, await self._fact(text.partition(" ")[2]))
             return
         if command is not None:
             # A typed command abandons any half-finished button prompt.
@@ -273,6 +310,15 @@ class Bot:
         return await approvals.resolve(
             self.db, arguments[0], arguments[1] == "success", arguments[2]
         )
+
+    async def _fact(self, text: str) -> str:
+        if not text.strip():
+            return "Usage: /fact kind: text, e.g. /fact skill: Python, 3 years"
+        try:
+            fact = await add_typed_fact(self.db, text)
+        except ValueError:
+            return "A fact is 1 to 500 characters."
+        return f"Saved as a confirmed {fact.kind} fact. See /facts."
 
     async def _prompt(self) -> str:
         return await self.onboarding.prompt()
