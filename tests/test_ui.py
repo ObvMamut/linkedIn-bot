@@ -414,3 +414,31 @@ def test_saved_job_searches_report_new_postings_only(tmp_path):
         assert "2 new" in api.edits[-1][2] and ("jobs", "security engineer", "Berlin") in conn.calls
 
     ui_env(tmp_path, scenario)
+
+
+def test_best_matches_cannot_be_saved_as_an_empty_search(tmp_path):
+    async def scenario(db, api, bot, conn):
+        await db.update_preferences(
+            lambda p: p.model_copy(update={"roles": ("security engineer",)})
+        )
+        await db.save_observations(
+            [
+                SourceObservation(
+                    source="greenhouse",
+                    external_id="1",
+                    url="https://boards.greenhouse.io/beta/jobs/1",
+                    title="Security Engineer",
+                    company="beta",
+                    location="Berlin",
+                    content_hash=digest(b"1"),
+                )
+            ]
+        )
+        await tap(bot, "m:jobs")
+        screen = api.edits[-1][3] if api.edits else api.markups[-1]
+        assert not any("Save search" in label for label, _ in flat(screen))
+        await tap(bot, "s:jobs")
+        await say(bot, "security engineer in Berlin")
+        assert any("Save search" in label for label, _ in flat(api.edits[-1][3]))
+
+    ui_env(tmp_path, scenario)

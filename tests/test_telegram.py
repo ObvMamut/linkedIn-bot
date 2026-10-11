@@ -564,3 +564,119 @@ def test_poll_loop_survives_network_errors_and_stops_on_request(tmp_path):
         await asyncio.wait_for(task, timeout=2)
 
     run(tmp_path, scenario)
+
+
+def test_a_failing_handler_answers_once_and_the_bot_keeps_going(tmp_path):
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        original = db.status
+
+        async def broken():
+            raise RuntimeError("boom")
+
+        db.status = broken
+        await bot.handle(update(2, "/status"))  # must not raise
+        assert "something went wrong" in api.sent[-1][1].lower()
+        assert await store.last_update_id() == 2
+        db.status = original
+        await bot.handle(update(3, "/status"))
+        assert "Paused" in api.sent[-1][1]
+        sent = len(api.sent)
+        db.status = broken
+        await bot.handle(update(4, "/status", user=999))  # strangers still get nothing
+        assert len(api.sent) == sent
+
+    run(tmp_path, scenario)
+
+
+def test_poll_forever_survives_a_failing_update(tmp_path):
+    class Poller(FakeAPI):
+        def __init__(self):
+            super().__init__()
+            self.batches = [[update(1, "/start nope")], [update(2, "/start nope")]]
+
+        async def get_updates(self, offset, poll_seconds=30):
+            if not self.batches:
+                stop.set()
+                return []
+            return self.batches.pop(0)
+
+    from linkedin_bot.workflows.telegram_bot import poll_forever
+
+    stop = asyncio.Event()
+
+    async def scenario(db, api, bot, store):
+        poller = Poller()
+        bot = Bot(db, poller)
+
+        async def broken(*_args):
+            raise RuntimeError("boom")
+
+        bot.store.binding = broken
+        await asyncio.wait_for(poll_forever(bot, poller, stop), timeout=5)
+        assert await store.last_update_id() == 2
+
+    run(tmp_path, scenario)
+
+
+def test_a_typed_command_abandons_a_pending_button_prompt(tmp_path):
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await bot.ui.store.set_awaiting("add:locations", {"msg": None})
+        await bot.handle(update(2, "/status"))
+        assert await bot.ui.store.awaiting() is None
+
+    run(tmp_path, scenario)
+
+
+def test_onboarding_keeps_menu_settings_and_drops_the_cv_copy(tmp_path):
+    async def scenario(db, api, bot, store):
+        code = await store.begin_pairing(now())
+        await bot.handle(update(1, f"/start {code}"))
+        await db.update_preferences(
+            lambda p: p.model_copy(update={"must_keywords": ("python",), "roles": ("analyst",)})
+        )
+        for number, text in enumerate(
+            ("data scientist", "Berlin", "none", "EU citizen", "Jane Doe CV text"), start=2
+        ):
+            await bot.handle(update(number, text))
+        preferences = await db.preferences()
+        assert preferences.must_keywords == ("python",)
+        assert preferences.roles == ("analyst", "data scientist")
+        assert preferences.locations == ("Berlin",)
+        step, answers = await store.onboarding()
+        assert step == "done" and "cv" not in answers and answers["roles"] == "data scientist"
+
+    run(tmp_path, scenario)
+
+
+def test_long_replies_are_split_on_line_boundaries_with_buttons_on_the_last_part():
+    import json
+
+    import httpx
+
+    from linkedin_bot.adapters.telegram import HttpTelegram, chunks
+
+    text = "\n".join(f"line {index} " + "x" * 90 for index in range(120))
+    parts = chunks(text)
+    assert len(parts) > 1 and all(len(part) <= 4000 for part in parts)
+    assert "\n".join(parts) == text
+    assert chunks("y" * 9000) == ["y" * 4000, "y" * 4000, "y" * 1000]
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": len(calls)}})
+
+    async def go():
+        api = HttpTelegram("123:token", transport=httpx.MockTransport(handler))
+        markup = {"inline_keyboard": [[{"text": "Go", "callback_data": "m:main"}]]}
+        message_id = await api.send_message(5, text, markup)
+        await api.close()
+        return message_id
+
+    assert asyncio.run(go()) == len(parts)
+    assert [("reply_markup" in call) for call in calls] == [False] * (len(parts) - 1) + [True]

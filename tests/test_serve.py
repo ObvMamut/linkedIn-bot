@@ -362,3 +362,97 @@ def test_monitor_loop_keeps_collecting_and_survives_failures():
         return runner.calls
 
     assert asyncio.run(go()) >= 5
+
+
+def test_pause_stops_alerts_and_linkedin_visits_but_not_the_local_digest(tmp_path):
+    async def scenario(db, api, scheduler, clock, conn, store):
+        await store.update_digest(enabled=True, alerts_messages=True, local_time="18:00")
+        await store.save_search("people", "query", "S")
+        await db.pause(True)
+        assert await scheduler.tick() == ["digest"]
+        assert "Paused" in api.sent[-1][1]
+        assert conn.calls == []  # not one LinkedIn page while paused
+        await db.pause(False)
+        clock.at += timedelta(hours=1)
+        assert await scheduler.tick() == ["message_alert"]
+
+    make(tmp_path, scenario)
+
+
+def test_an_edited_posting_is_not_announced_again(tmp_path):
+    async def scenario(db, api, scheduler, clock, conn, store):
+        await store.pin("firm", "https://www.linkedin.com/company/beta", "Beta")
+        await db.save_observations(
+            [posting("1", "Security Engineer", "beta", observed=clock.at - timedelta(days=3))]
+        )
+        await store.update_digest(alerts_boards=True)
+        assert await scheduler.tick() == []
+        edited = posting(
+            "1", "Security Engineer II", "beta", observed=clock.at + timedelta(minutes=1)
+        )
+        await db.save_observations([edited])
+        clock.at += timedelta(minutes=10)
+        assert await scheduler.tick() == []
+        text = await scheduler.digest.build()
+        assert "Security Engineer II" not in text.split("Pinned firms")[0]
+
+    make(tmp_path, scenario)
+
+
+def test_unread_alerts_ignore_relative_times_and_return_after_reading(tmp_path):
+    from linkedin_bot.adapters.linkedin.models import Conversation
+
+    jane = Conversation(id="0", title="Jane Doe", snippet="hi", unread=True, when="2:15 PM")
+    conn = UIConnector(conversations=(jane,))
+
+    async def scenario(db, api, scheduler, clock, conn, store):
+        await store.update_digest(alerts_messages=True)
+        assert await scheduler.tick() == ["message_alert"]
+        conn.conversations = (jane.model_copy(update={"when": "Yesterday"}),)
+        clock.at += timedelta(hours=1)
+        assert await scheduler.tick() == []  # same conversation, new relative time
+        conn.conversations = (jane.model_copy(update={"unread": False}),)
+        clock.at += timedelta(hours=1)
+        assert await scheduler.tick() == []
+        conn.conversations = (jane,)
+        clock.at += timedelta(hours=1)
+        assert await scheduler.tick() == ["message_alert"]  # unread again after being read
+
+    make(tmp_path, scenario, connector=conn)
+
+
+def test_digest_counts_linkedin_postings_at_pinned_firms(tmp_path):
+    async def scenario(db, api, scheduler, clock, conn, store):
+        await store.pin("firm", "https://www.linkedin.com/company/acme", "Acme Rockets")
+        await db.save_observations(
+            [
+                SourceObservation(
+                    source="linkedin",
+                    external_id="9",
+                    url="https://www.linkedin.com/jobs/view/9",
+                    title="Security Engineer",
+                    company="Acme Rockets",
+                    location="Berlin",
+                    content_hash=digest(b"9"),
+                    observed_at=clock.at,
+                )
+            ]
+        )
+        text = await scheduler.digest.build()
+        assert "Acme Rockets: 1 opening" in text
+
+    make(tmp_path, scenario)
+
+
+def test_digest_settings_writes_do_not_undo_each_other(tmp_path):
+    async def scenario(db, api, scheduler, clock, conn, store):
+        stale = await store.digest()
+        await store.update_digest(alerts_boards=True)
+        # A writer holding an older view only touches the column it changes.
+        await store.update_digest(last_alert_at=clock.at.isoformat())
+        current = await store.digest()
+        assert current.alerts_boards is True and stale.alerts_boards is False
+        with pytest.raises(ValueError):
+            await store.update_digest(nonsense=1)
+
+    make(tmp_path, scenario)

@@ -6,12 +6,19 @@ data_dir = "~/.local/share/linkedin-bot"
 transport = "long_polling"
 
 [linkedin]
+# How often linked public job boards are read, and how often unread messages are checked.
 jobs_interval_minutes = 360
 inbox_interval_minutes = 30
-requests_interval_minutes = 30
-posts_interval_minutes = 360
+# Close the warm headless browser after this many idle seconds.
+idle_close_seconds = 600
+# Skip images, fonts, media and ad/analytics hosts while reading.
+block_resources = true
+# Use an installed Chromium instead of searching PATH (optional).
+# browser_executable = "/usr/bin/chromium"
 
 [inference]
 local_endpoint = "http://127.0.0.1:11434"
 max_concurrency = 1
 task_deadline_seconds = 300
+# An Ollama model you installed yourself enables drafts, fact extraction and the AI check.
+# model = "qwen3:8b"

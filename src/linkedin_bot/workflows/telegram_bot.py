@@ -32,7 +32,7 @@ from linkedin_bot.workflows.digest import DigestService
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
 from linkedin_bot.workflows.materials import Generator, draft_cover_letter
-from linkedin_bot.workflows.ui.router import UI, BoardFinder
+from linkedin_bot.workflows.ui.router import BOARD_INTERVAL_SECONDS, UI, BoardFinder
 
 STEPS = ("roles", "locations", "exclusions", "eligibility", "cv")
 PROMPTS = {
@@ -71,6 +71,7 @@ class Bot:
         executor: Executor | None = None,
         linkedin: LinkedInCommands | None = None,
         board_finder: BoardFinder | None = None,
+        board_interval_seconds: int = BOARD_INTERVAL_SECONDS,
     ) -> None:
         self.db = database
         self.api = api
@@ -85,6 +86,7 @@ class Bot:
             board_finder,
             llm_enabled=generator is not None,
             digest_service=DigestService(database, linkedin, generator),
+            board_interval_seconds=board_interval_seconds,
         )
 
     async def handle(self, update: Update) -> None:
@@ -97,8 +99,25 @@ class Bot:
                 await self._dispatch(message.sender.id, message.chat.id, message.text.strip())
             elif query is not None and query.data and query.message is not None:
                 await self._press(query.sender.id, query.message.chat, query)
+        except Exception:
+            # One failing update must never stop the bot. Only the event name is logged.
+            logging.warning("", extra={"event": "telegram_handler_failed"})
+            sender = message.sender.id if message is not None else None
+            chat = message.chat.id if message is not None else None
+            if query is not None and query.message is not None:
+                sender, chat = query.sender.id, query.message.chat.id
+            await self._apologise(sender, chat)
         finally:
             await self.store.record_update(update.update_id)
+
+    async def _apologise(self, user_id: int | None, chat_id: int | None) -> None:
+        """Tell the paired user (and nobody else) that the last request failed."""
+        try:
+            if user_id is not None and await self.store.binding() == (user_id, chat_id):
+                assert chat_id is not None
+                await self._reply(chat_id, "Something went wrong with that request. Try again.")
+        except Exception:
+            logging.warning("", extra={"event": "telegram_reply_failed"})
 
     async def _press(self, user_id: int, chat: Chat, query: CallbackQuery) -> None:
         """Buttons get the same authorisation as messages: the paired user in the paired chat."""
@@ -121,6 +140,9 @@ class Bot:
         if command == "/menu":
             await self.ui.open_menu(chat_id)
             return
+        if command is not None:
+            # A typed command abandons any half-finished button prompt.
+            await self.ui.store.clear_awaiting()
         if command is None and await self.ui.handle_text(chat_id, text):
             return
         if command == "/start":
@@ -131,7 +153,7 @@ class Bot:
             await self._reply(
                 chat_id,
                 f"{MODE_LINE}\nPaused: {status['paused']}\nOnboarding: {step}\n"
-                f"Facts: {status['facts']}  Opportunities seen: {status['observations']}",
+                f"Facts: {status['facts']}  Opportunities seen: {status['postings']}",
             )
         elif command == "/opportunities":
             await self._reply(chat_id, await self._opportunities())
@@ -296,6 +318,8 @@ class Bot:
         following = STEPS[STEPS.index(step) + 1] if step != STEPS[-1] else "done"
         if following == "done":
             await self._finish(answers, now())
+            # The CV now lives in its own checked artifact; keep no second copy here.
+            answers = {key: value for key, value in answers.items() if key != "cv"}
         await self.store.set_onboarding(following, answers)
         await self._reply(
             chat_id,
@@ -310,21 +334,27 @@ class Bot:
             p for p in split(answers["locations"]) if p.lower() not in ("remote ok", "remote")
         )
         roles = split(answers["roles"])
-        current = await self.db.call(
-            lambda c: c.execute("SELECT MAX(revision) FROM preferences").fetchone()[0]
-        )
         exclusions = () if answers["exclusions"].lower() == "none" else split(answers["exclusions"])
-        await self.db.save_preferences(
-            SearchPreferences(
-                revision=current + 1,
-                roles=roles,
-                locations=places,
-                remote=remote,
-                internship=any("intern" in role.lower() for role in roles) or None,
-                exclusions=exclusions,
-            ),
-            current,
-        )
+
+        def merge(current: SearchPreferences) -> SearchPreferences:
+            # Settings changed from /menu before onboarding ended are kept; answers add to them.
+            def union(old: tuple[str, ...], new: tuple[str, ...]) -> tuple[str, ...]:
+                seen = {value.lower() for value in old}
+                return old + tuple(value for value in new if value.lower() not in seen)
+
+            return current.model_copy(
+                update={
+                    "roles": union(current.roles, roles),
+                    "locations": union(current.locations, places),
+                    "remote": current.remote if remote is None else remote,
+                    "internship": current.internship
+                    or any("intern" in role.lower() for role in roles)
+                    or None,
+                    "exclusions": union(current.exclusions, exclusions),
+                }
+            )
+
+        await self.db.update_preferences(merge)
         await self.db.save_fact(
             CandidateFact(
                 kind="work_eligibility",

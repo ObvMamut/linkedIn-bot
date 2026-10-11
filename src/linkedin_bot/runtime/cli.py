@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from linkedin_bot.adapters.ats import ATSSource, Board, Provider
 from linkedin_bot.adapters.browser_probe import browser_smoke
 from linkedin_bot.adapters.linkedin.connector import LinkedInConnector
-from linkedin_bot.adapters.linkedin.limits import Limiter
+from linkedin_bot.adapters.linkedin.limits import BudgetFile, Limiter
 from linkedin_bot.adapters.linkedin.session import (
     WarmSession,
     manual_login_command,
@@ -27,7 +27,7 @@ from linkedin_bot.adapters.linkedin.session import (
 )
 from linkedin_bot.adapters.ollama import OllamaGenerator, OllamaProbe
 from linkedin_bot.adapters.public_http import AdapterError, PublicHTTP
-from linkedin_bot.adapters.telegram import HttpTelegram
+from linkedin_bot.adapters.telegram import TOKEN_ENV, HttpTelegram
 from linkedin_bot.domain.models import identifier, now
 from linkedin_bot.runtime.config import Config, load_config
 from linkedin_bot.runtime.locking import AlreadyRunning, RuntimeLock
@@ -36,6 +36,7 @@ from linkedin_bot.storage.database import Database, RevisionConflict, SchemaErro
 from linkedin_bot.storage.linkedin import LinkedInStore
 from linkedin_bot.storage.restore import restore_backup
 from linkedin_bot.storage.telegram import TelegramStore
+from linkedin_bot.storage.workspace import WorkspaceStore
 from linkedin_bot.workflows.boards import find_board, public_probe
 from linkedin_bot.workflows.executor import Executor
 from linkedin_bot.workflows.linkedin_commands import LinkedInCommands
@@ -67,7 +68,11 @@ def parser() -> argparse.ArgumentParser:
         if name == "collect":
             command.add_argument("--limit", type=int, default=20)
         else:
-            command.add_argument("--interval-seconds", type=int, default=21600)
+            command.add_argument(
+                "--interval-seconds",
+                type=int,
+                help="Defaults to linkedin.jobs_interval_minutes from the config",
+            )
     run = commands.add_parser("run", help="Run explicitly configured read work in the foreground")
     run.add_argument("--once", action="store_true", help="Process at most one due work item")
     commands.add_parser("pair", help="Print a one-use Telegram pairing code (valid ten minutes)")
@@ -111,7 +116,7 @@ async def timing(config: Config) -> int:
         playwright_launcher(
             config.root, config.linkedin.browser_executable, config.linkedin.block_resources
         ),
-        Limiter(delay=lambda: 0.0),
+        Limiter(delay=lambda: 0.0, budget=BudgetFile(config.root)),
     )
     steps: list[tuple[str, Callable[[LinkedInConnector], Awaitable[Any]]]] = [
         ("status", lambda c: c.status()),
@@ -154,11 +159,15 @@ async def linkedin_cli(args: argparse.Namespace, config: Config) -> int:
         emit({"instruction": "Sign in, then close the browser window. Nothing is automated."})
         process = await asyncio.create_subprocess_exec(*manual_login_command(browser, config.root))
         await process.wait()
-        async with open_connector(config.root, Limiter(), executable) as connector:
+        async with open_connector(
+            config.root, Limiter(budget=BudgetFile(config.root)), executable
+        ) as connector:
             state = await connector.status()
         emit({"session": state})
         return 0 if state == "ready" else 2
-    async with open_connector(config.root, Limiter(), executable) as connector:
+    async with open_connector(
+        config.root, Limiter(budget=BudgetFile(config.root)), executable
+    ) as connector:
         emit({"session": await connector.status()})
     return 0
 
@@ -205,7 +214,7 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                     workflow,
                     board.model_dump_json(),
                     now(),
-                    getattr(args, "interval_seconds", 21600),
+                    getattr(args, "interval_seconds", None) or config.board_interval_seconds,
                     recurring=args.command == "schedule-board",
                 )
                 if args.command == "collect":
@@ -251,27 +260,46 @@ async def execute(args: argparse.Namespace, config: Config) -> int:
                 await foreground(database, once=args.once)
                 emit({"stopped": True})
             else:
-                emit(
-                    {
-                        **await database.status(),
-                        "policy": (await database.policy()).model_dump(),
-                        "recovery": recovery,
-                        **artifact_health,
-                        "capabilities": {
-                            "linkedin": "pending_login_and_read_gates",
-                            "telegram": "paired"
-                            if await TelegramStore(database).binding()
-                            else "unpaired",
-                            "inference": "not_evaluated",
-                            "employer_effects": "disabled",
-                            "deepseek": "disabled",
-                        },
-                    }
-                )
+                emit(await doctor(database, config, recovery, artifact_health))
         finally:
             await database.close()
             logging.info("", extra={"event": "runtime_stopped"})
     return 0
+
+
+async def doctor(
+    database: Database, config: Config, recovery: dict[str, int], artifacts: dict[str, int]
+) -> dict[str, object]:
+    """What is configured and what state it is in. Names and counts only, never content."""
+    status = await database.status()
+    linkedin_state, last_ok = await LinkedInStore(database).state()
+    digest = await WorkspaceStore(database).digest()
+    work = cast(list[dict[str, object]], status["work"])
+    states: dict[str, int] = {}
+    for item in work:
+        states[str(item["state"])] = states.get(str(item["state"]), 0) + 1
+    budget = Limiter(budget=BudgetFile(config.root)).usage()
+    return {
+        **status,
+        "work_states": states,
+        "policy": (await database.policy()).model_dump(),
+        "recovery": recovery,
+        **artifacts,
+        "capabilities": {
+            "linkedin": {"session": linkedin_state, "last_ok": last_ok, "budget": budget},
+            "telegram": "paired" if await TelegramStore(database).binding() else "unpaired",
+            "telegram_token": "set" if os.environ.get(TOKEN_ENV) else "missing",
+            "inference": config.inference.model or "not_configured",
+            "digest": {
+                "enabled": digest.enabled,
+                "time": digest.local_time,
+                "board_alerts": digest.alerts_boards,
+                "message_alerts": digest.alerts_messages,
+            },
+            "employer_effects": "disabled",
+            "deepseek": "disabled",
+        },
+    }
 
 
 async def foreground(database: Database, *, once: bool) -> None:
@@ -302,7 +330,8 @@ async def telegram_foreground(
     api = HttpTelegram()
     generator = OllamaGenerator(config.inference) if config.inference.model else None
     # No effect adapter is registered, so approved actions stay blocked until one is added.
-    limiter = Limiter()  # shared, so the page budget holds across Telegram commands
+    # Shared and persisted, so the page budget and cooldowns hold across commands and restarts.
+    limiter = Limiter(budget=BudgetFile(config.root))
     session = WarmSession(
         playwright_launcher(
             config.root, config.linkedin.browser_executable, config.linkedin.block_resources
@@ -323,6 +352,7 @@ async def telegram_foreground(
         Executor(database, timezone=config.timezone),
         commands,
         board_finder,
+        board_interval_seconds=config.board_interval_seconds,
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

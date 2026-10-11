@@ -44,6 +44,7 @@ FIELD_AREA = {
     "preferred_industries": "firm",
 }
 BOARD_INTERVAL_SECONDS = 6 * 3600
+SCREEN_LIMIT = 3900  # an edited screen is one message; longer text is sent instead
 
 
 @dataclass
@@ -68,9 +69,11 @@ class UI:
         board_finder: BoardFinder | None = None,
         llm_enabled: bool = False,
         digest_service: DigestService | None = None,
+        board_interval_seconds: int = BOARD_INTERVAL_SECONDS,
     ) -> None:
         self.db, self.api, self.linkedin, self.finder = database, api, linkedin, board_finder
         self.llm_enabled = llm_enabled
+        self.board_interval_seconds = board_interval_seconds
         self.digest_service = digest_service
         self.store = WorkspaceStore(database)
         self.linked = LinkedInStore(database)
@@ -279,7 +282,8 @@ class UI:
             token,
             pinnable=payload["kind"] in SEARCH_KINDS,
             saved_id=payload["saved_id"],
-            can_save=payload["kind"] in ALL_KINDS,
+            # "Best matches" has no query to rerun, so it cannot become a saved search.
+            can_save=payload["kind"] in ALL_KINDS and bool(payload["query"]),
         )
 
     async def page(self, ctx: Ctx, rest: str) -> str | None:
@@ -477,7 +481,7 @@ class UI:
         await self.store.link_board(pin.url, provider, slug)
         board = Board.model_validate({"provider": provider, "slug": slug})
         await self.db.schedule(
-            f"ats:{provider}:{slug}", board.model_dump_json(), now(), BOARD_INTERVAL_SECONDS
+            f"ats:{provider}:{slug}", board.model_dump_json(), now(), self.board_interval_seconds
         )
         updated = await self.pin_by_key(pin_key(pin.url))
         await self.show(ctx, screens.pin_detail(updated or pin))
@@ -623,9 +627,14 @@ class UI:
             return
         await self.loading(ctx, "⏳ Building your digest…")
         text = await self.digest_service.build()
-        await self.show(
-            ctx, Screen(text[:3900], [[Button("⬅ Digest settings", "set:digest"), screens.HOME]])
-        )
+        back = [[Button("⬅ Digest settings", "set:digest"), screens.HOME]]
+        if len(text) <= SCREEN_LIMIT:
+            await self.show(ctx, Screen(text, back))
+            return
+        # Too long for one screen: send it whole (split by the adapter), then the buttons.
+        await self.api.send_message(ctx.chat_id, text)
+        ctx.message_id = None
+        await self.show(ctx, Screen("📰 Digest sent above.", back))
 
     # ---- pending text input -------------------------------------------------------------
     async def consume(self, ctx: Ctx, name: str, text: str) -> None:

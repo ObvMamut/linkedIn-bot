@@ -70,17 +70,17 @@ class PublicHTTP:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def get(self, url: str) -> bytes:
+    async def get(self, url: str, *, max_bytes: int | None = None) -> bytes:
         async with self.lane:
             try:
                 async with asyncio.timeout(30):
-                    return await self._get(url)
+                    return await self._get(url, max_bytes or self.max_bytes)
             except (TimeoutError, httpx.TimeoutException) as exc:
                 raise AdapterError("timeout", transient=True) from exc
             except httpx.TransportError as exc:
                 raise AdapterError("provider_unavailable", transient=True) from exc
 
-    async def _get(self, url: str) -> bytes:
+    async def _get(self, url: str, max_bytes: int) -> bytes:
         for redirects in range(4):
             original = validate_public_url(url)
             port = original.port or (443 if original.scheme == "https" else 80)
@@ -114,7 +114,7 @@ class PublicHTTP:
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
                     content.extend(chunk)
-                    if len(content) > self.max_bytes:
+                    if len(content) > max_bytes:
                         raise AdapterError("response_too_large")
                 return bytes(content)
             finally:

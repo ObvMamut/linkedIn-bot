@@ -246,3 +246,11 @@ def test_release_command_closes_the_browser_and_is_explained_without_one(tmp_pat
 
     api = asyncio.run(main(None))
     assert released == [True] and "released" in last(api).lower()
+
+
+def test_status_records_the_state_the_page_showed_not_just_that_it_answered(tmp_path):
+    connector = FakeConnector(state="auth_required")
+    api, db = ask(tmp_path, connector, "/li_status")
+    assert "auth_required" in last(api) and "linkedin login" in last(api)
+    state = asyncio.run(_state(tmp_path))
+    assert state == ("auth_required", None)

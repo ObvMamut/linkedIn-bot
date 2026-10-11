@@ -42,6 +42,26 @@ def has_word(text: str, word: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
 
 
+def has_term(text: str, term: str) -> bool:
+    """`term` as whole words in `text` (both compared lower case), allowing a plural ending.
+
+    Substring checks misread "International" as an internship and "javascript" as "java".
+    """
+    term = term.strip().lower()
+    if not term:
+        return False
+    pattern = rf"(?<![a-z0-9]){re.escape(term)}(?:s|es)?(?![a-z0-9])"
+    return re.search(pattern, text.lower()) is not None
+
+
+def matches_firm(company: str, tokens: Collection[str]) -> bool:
+    """Whether a posting's company is one of the pinned firm names or board slugs."""
+    company = company.lower()
+    return bool(company) and any(
+        token.lower() == company or has_term(company, token) for token in tokens if token
+    )
+
+
 def seniority_of(title: str) -> str:
     lowered = title.lower()
     for level, markers in SENIORITY_WORDS.items():
@@ -53,7 +73,7 @@ def seniority_of(title: str) -> str:
 def type_of(title: str) -> str:
     lowered = title.lower()
     for kind, markers in TYPE_WORDS.items():
-        if any(marker in lowered for marker in markers):
+        if any(has_term(lowered, marker) for marker in markers):
             return kind
     return "full_time"
 
@@ -87,13 +107,11 @@ def score_posting(
     company = (posting.company or "").lower()
     haystack = " ".join((title, location, description, company))
     # Hard filters: a posting failing any of these is never shown.
-    if any(term.lower() in haystack for term in preferences.exclusions):
+    if any(has_term(haystack, term) for term in preferences.exclusions):
         return None
-    if any(
-        term.lower() in f"{company} {posting.url.lower()}" for term in preferences.blocked_firms
-    ):
+    if any(has_term(f"{company} {posting.url}", term) for term in preferences.blocked_firms):
         return None
-    if any(term.lower() not in haystack for term in preferences.must_keywords):
+    if any(not has_term(haystack, term) for term in preferences.must_keywords):
         return None
     age = age_days(posting, at)
     if preferences.max_age_days is not None and age > preferences.max_age_days:
@@ -116,7 +134,7 @@ def score_posting(
             role = max(role, 0.4)
         elif phrase.lower() in description:
             role = max(role, 0.4)
-    nice = [k for k in preferences.nice_keywords if k.lower() in haystack]
+    nice = [k for k in preferences.nice_keywords if has_term(haystack, k)]
     if not preferences.roles and (preferences.must_keywords or nice):
         role = 1.0
     if role == 0.0:
@@ -144,7 +162,10 @@ def score_posting(
     fractions["role"] = role
 
     # Location.
-    if not (preferences.locations or preferences.remote):
+    if preferences.remote is False and has_term(location, "remote"):
+        gaps.append("remote role (you chose on-site only)")
+        fractions["location"] = 0.0
+    elif not (preferences.locations or preferences.remote):
         fractions["location"] = 1.0
     elif not location:
         gaps.append("location unknown")
@@ -152,7 +173,7 @@ def score_posting(
     elif any(place.lower() in location for place in preferences.locations):
         reasons.append("location matches")
         fractions["location"] = 1.0
-    elif preferences.remote and "remote" in location:
+    elif preferences.remote and has_term(location, "remote"):
         reasons.append("remote")
         fractions["location"] = 1.0
     else:
@@ -161,10 +182,13 @@ def score_posting(
 
     # Firm: pinned firms and preferred industries.
     firm = 0.0
-    if company and any(token.lower() == company or token.lower() in company for token in pinned):
+    if matches_firm(company, pinned):
         reasons.append("pinned firm")
         firm = 1.0
-    elif any(term.lower() in f"{title} {description}" for term in preferences.preferred_industries):
+    elif any(
+        has_term(f"{title} {description} {company}", term)
+        for term in preferences.preferred_industries
+    ):
         reasons.append("preferred industry")
         firm = 0.6
     fractions["firm"] = firm

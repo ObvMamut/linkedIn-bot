@@ -16,7 +16,7 @@ async def run_one(database: Database, http: PublicHTTP) -> bool:
     try:
         board = Board.model_validate_json(work.payload)
         async with asyncio.timeout(max(1, (work.deadline - now()).total_seconds())):
-            page = await ATSSource(http, board).collect(cursor=work.checkpoint)
+            page = await ATSSource(http, board).collect_board(cursor=work.checkpoint)
         await database.persist_page(work, page, now())
         logging.info("", extra={"event": "read_finished", "count": len(page.items)})
     except AdapterError as exc:

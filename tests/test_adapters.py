@@ -231,3 +231,96 @@ def test_official_page_requires_exact_board_link():
         "https://jobs.ashbyhq.com/Synthetic/role",
     )
     assert board_links("jobs.ashbyhq.com/Synthetic", "https://example.org/careers", board) == ()
+
+
+class Pages:
+    """A PublicHTTP stand-in that answers from a function of the URL."""
+
+    def __init__(self, answer):
+        self.answer, self.urls = answer, []
+
+    async def get(self, url, *, max_bytes=None):
+        self.urls.append((url, max_bytes))
+        return self.answer(url)
+
+
+def test_greenhouse_scheduled_read_keeps_the_whole_board_with_text_and_dates():
+    jobs = [
+        {
+            "id": index,
+            "title": f"Engineer {index}",
+            "absolute_url": f"https://example.org/{index}",
+            "location": {"name": "Berlin"},
+            "content": "&lt;p&gt;We build &amp;amp; ship.&lt;/p&gt;"
+            "&lt;ul&gt;&lt;li&gt;Python&lt;/li&gt;&lt;/ul&gt;",
+            "updated_at": "2026-10-01T10:00:00-04:00",
+            **({"first_published": "2026-09-01T10:00:00-04:00"} if index == 0 else {}),
+        }
+        for index in range(60)
+    ]
+    http = Pages(lambda url: json.dumps({"jobs": jobs}).encode())
+    page = asyncio.run(ATSSource(http, Board(provider="greenhouse", slug="acme")).collect_board())
+    assert len(page.items) == 60 and page.coverage == "complete"
+    assert page.items[0].description == "We build & ship.\nPython"
+    assert page.items[0].published_at == "2026-09-01T10:00:00-04:00"
+    assert page.items[1].published_at == "2026-10-01T10:00:00-04:00"
+    assert http.urls[0][0].endswith("/jobs?content=true") and http.urls[0][1] > 2_000_000
+
+
+def test_greenhouse_falls_back_to_the_list_when_descriptions_are_too_large():
+    def answer(url):
+        if "content=true" in url:
+            raise AdapterError("response_too_large")
+        return json.dumps(
+            {"jobs": [{"id": 1, "title": "A", "absolute_url": "https://e.org/1", "location": {}}]}
+        ).encode()
+
+    http = Pages(answer)
+    page = asyncio.run(ATSSource(http, Board(provider="greenhouse", slug="acme")).collect_board())
+    assert [o.title for o in page.items] == ["A"] and page.items[0].description is None
+    assert [url.endswith("/jobs") for url, _ in http.urls] == [False, True]
+
+
+def test_lever_scheduled_read_walks_pages_and_reads_creation_dates():
+    def answer(url):
+        skip = int(url.rsplit("skip=", 1)[1])
+        count = 100 if skip < 200 else 30
+        return json.dumps(
+            [
+                {
+                    "id": f"{skip + i}",
+                    "text": "Intern",
+                    "hostedUrl": f"https://jobs.lever.co/x/{skip + i}",
+                    "categories": {"location": "Warsaw"},
+                    "createdAt": 1_790_000_000_000,
+                }
+                for i in range(count)
+            ]
+        ).encode()
+
+    http = Pages(answer)
+    page = asyncio.run(ATSSource(http, Board(provider="lever", slug="x")).collect_board())
+    assert len(page.items) == 230 and page.coverage == "complete" and page.next_cursor is None
+    assert page.items[0].published_at.startswith("2026-")
+    assert len(http.urls) == 3
+
+
+def test_lever_scheduled_read_stops_after_a_bounded_number_of_pages():
+    def answer(url):
+        skip = int(url.rsplit("skip=", 1)[1])
+        return json.dumps(
+            [
+                {"id": f"{skip + i}", "text": "T", "hostedUrl": "https://e.org", "categories": {}}
+                for i in range(100)
+            ]
+        ).encode()
+
+    http = Pages(answer)
+    page = asyncio.run(ATSSource(http, Board(provider="lever", slug="x")).collect_board())
+    assert len(http.urls) == 5 and page.coverage == "partial" and page.next_cursor == "500"
+
+
+def test_board_limits_follow_the_provider():
+    assert Board(provider="greenhouse", slug="a").endpoint(500, None)
+    with pytest.raises(AdapterError, match="invalid_limit"):
+        Board(provider="lever", slug="a").endpoint(101, None)

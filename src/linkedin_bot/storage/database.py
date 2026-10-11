@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from typing import TypeVar
@@ -793,20 +793,36 @@ class Database:
 
         await self.call(write)
 
-    async def opportunities(self, since: datetime | None) -> tuple[SourceObservation, ...]:
-        """Latest version of each posting; `since` drops postings not seen recently."""
+    async def opportunities(
+        self, since: datetime | None, *, first_seen_after: datetime | None = None
+    ) -> tuple[SourceObservation, ...]:
+        """Latest version of each posting.
 
-        def read(connection: sqlite3.Connection) -> tuple[SourceObservation, ...]:
+        `since` drops postings not seen recently; `first_seen_after` keeps only postings whose
+        first sighting (of any version) is later, so an edited posting never reads as new.
+        """
+        return tuple(posting for posting, _ in await self.postings(since, first_seen_after))
+
+    async def postings(
+        self, since: datetime | None, first_seen_after: datetime | None = None
+    ) -> tuple[tuple[SourceObservation, datetime], ...]:
+        """(latest version, first sighting) per posting, filtered in SQL."""
+        seen = None if since is None else since.astimezone(UTC).isoformat()
+        first = None if first_seen_after is None else first_seen_after.astimezone(UTC).isoformat()
+
+        def read(connection: sqlite3.Connection) -> tuple[tuple[SourceObservation, datetime], ...]:
             rows = connection.execute(
-                "SELECT snapshot,last_seen FROM observations o WHERE last_seen=("
-                "SELECT MAX(last_seen) FROM observations "
-                "WHERE source=o.source AND external_id=o.external_id) "
-                "GROUP BY source,external_id ORDER BY source,external_id"
+                "SELECT o.snapshot,f.first_seen FROM observations o JOIN "
+                "(SELECT source,external_id,MAX(last_seen) last_seen,MIN(first_seen) first_seen "
+                "FROM observations GROUP BY source,external_id) f "
+                "ON o.source=f.source AND o.external_id=f.external_id AND o.last_seen=f.last_seen "
+                "WHERE (? IS NULL OR f.last_seen>=?) AND (? IS NULL OR f.first_seen>?) "
+                "GROUP BY o.source,o.external_id ORDER BY o.source,o.external_id",
+                (seen, seen, first, first),
             )
             return tuple(
-                SourceObservation.model_validate_json(snapshot)
-                for snapshot, last_seen in rows
-                if since is None or datetime.fromisoformat(last_seen) >= since
+                (SourceObservation.model_validate_json(snapshot), datetime.fromisoformat(stamp))
+                for snapshot, stamp in rows
             )
 
         return await self.call(read)
@@ -827,6 +843,9 @@ class Database:
                 "observations": connection.execute("SELECT count(*) FROM observations").fetchone()[
                     0
                 ],
+                "postings": connection.execute(
+                    "SELECT count(*) FROM (SELECT 1 FROM observations GROUP BY source,external_id)"
+                ).fetchone()[0],
                 "artifacts": connection.execute("SELECT count(*) FROM artifacts").fetchone()[0],
                 "work": [
                     dict(

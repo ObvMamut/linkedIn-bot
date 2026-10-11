@@ -65,12 +65,18 @@ class Scheduler:
         local = at.astimezone(self.zone)
         hhmm = local.strftime("%H:%M")
         done: list[str] = []
+        paused = (await self.db.policy()).paused
         if (
             settings.enabled
             and hhmm >= settings.local_time
             and settings.last_digest_date != local.date().isoformat()
         ):
-            done += await self.guard(self.send_digest(chat_id, local.date().isoformat()))
+            # While paused the digest still arrives, built from local data only.
+            done += await self.guard(
+                self.send_digest(chat_id, local.date().isoformat(), linkedin=not paused)
+            )
+        if paused:
+            return done  # no alerts and no LinkedIn visits while paused
         if not in_quiet_hours(hhmm, settings.quiet_start, settings.quiet_end):
             if settings.alerts_boards:
                 done += await self.guard(self.board_alerts(chat_id, settings, at))
@@ -85,8 +91,8 @@ class Scheduler:
             logging.warning("", extra={"event": "scheduler_failed"})
             return []
 
-    async def send_digest(self, chat_id: int, day: str) -> list[str]:
-        await self.api.send_message(chat_id, await self.digest.build())
+    async def send_digest(self, chat_id: int, day: str, *, linkedin: bool = True) -> list[str]:
+        await self.api.send_message(chat_id, await self.digest.build(linkedin=linkedin))
         await self.store.update_digest(last_digest_date=day)
         return ["digest"]
 
@@ -95,7 +101,8 @@ class Scheduler:
             await self.store.update_digest(last_alert_at=at.isoformat())
             return []  # alerts begin from the moment they are switched on
         cutoff = datetime.fromisoformat(settings.last_alert_at)
-        postings = [o for o in await self.db.opportunities(since=None) if o.observed_at > cutoff]
+        # First sighting, so an edited posting is not announced again as a new opening.
+        postings = await self.db.opportunities(since=None, first_seen_after=cutoff)
         matches = [
             m
             for m in rank(postings, await self.db.preferences(), await self.store.pinned_tokens())
@@ -125,18 +132,16 @@ class Scheduler:
             await self.api.send_message(chat_id, f"⚠️ {error}")
             return ["auth_notice"]
         await self.kv.set("linkedin_notice", "")
-        unread = [c for c in result.items if c.unread]
-        seen = json.loads(await self.kv.get("alerted_unread") or "[]")
-        fresh = [
-            (c, hash_key(c.title, c.when)) for c in unread if hash_key(c.title, c.when) not in seen
-        ]
+        # A conversation is announced when it becomes unread, and again only after it was
+        # read in between. Relative times ("2:15 PM", then "Yesterday") are not part of the key.
+        unread = {hash_key(c.title): c for c in result.items if c.unread}
+        seen = set(json.loads(await self.kv.get("alerted_unread") or "[]"))
+        fresh = [c for key, c in unread.items() if key not in seen]
+        await self.kv.set("alerted_unread", json.dumps(sorted(unread)[:SEEN_LIMIT]))
         if not fresh:
             return []
-        names = ", ".join(c.title for c, _ in fresh)
+        names = ", ".join(c.title for c in fresh)
         await self.api.send_message(chat_id, f"📬 {len(fresh)} unread conversation(s): {names}")
-        await self.kv.set(
-            "alerted_unread", json.dumps((seen + [k for _, k in fresh])[-SEEN_LIMIT:])
-        )
         return ["message_alert"]
 
 

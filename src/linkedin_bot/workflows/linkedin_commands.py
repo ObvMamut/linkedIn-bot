@@ -75,6 +75,16 @@ def explain(error: LinkedInError) -> str:
             return "The LinkedIn browser session is unavailable (is another window using it?)."
 
 
+def status_text(state: str) -> str:
+    note = "" if state == "ready" else f"\n{LOGIN_HINT}"
+    layout = (
+        f"verified against live pages on {LAYOUT_VERIFIED}"
+        if LAYOUT_VERIFIED
+        else "unverified (not yet checked)"
+    )
+    return f"LinkedIn session: {state}.\nPage layout: {layout}.{note}"
+
+
 def clip(text: str, size: int) -> str:
     return text if len(text) <= size else text[: size - 1] + "…"
 
@@ -101,15 +111,28 @@ class LinkedInCommands:
             if self.release is not None:
                 await self.release()
             return "Browser released. You can run `linkedin-bot linkedin login` now."
+        if command == "/li_status":
+            state, error = await self.check()
+            return error or status_text(state or "unavailable")
         result, error = await self.fetch(lambda connector: self.run(connector, command, rest))
         return clip(result, LIMIT) if result is not None else (error or "")
 
-    async def fetch(self, call: Callable[[Connector], Awaitable[T]]) -> tuple[T | None, str | None]:
+    async def check(self) -> tuple[SessionState | None, str | None]:
+        """Load the feed once and record the state it showed, not just that a page answered."""
+        state, error = await self.fetch(lambda connector: connector.status(), record_ready=False)
+        if state is not None:
+            await self.store.record(state, now())
+        return state, error
+
+    async def fetch(
+        self, call: Callable[[Connector], Awaitable[T]], *, record_ready: bool = True
+    ) -> tuple[T | None, str | None]:
         """Run `call` on the connector. Returns (result, None) or (None, short user message)."""
         try:
             async with self.opener() as connector:
                 result = await call(connector)
-            await self.store.record("ready", now())
+            if record_ready:
+                await self.store.record("ready", now())
             return result, None
         except LinkedInError as error:
             if error.code in ("auth_required", "challenge_required", "unavailable"):
@@ -121,15 +144,6 @@ class LinkedInCommands:
             return None, explain(LinkedInError("unavailable"))
 
     async def run(self, connector: Connector, command: str, rest: str) -> str:
-        if command == "/li_status":
-            state = await connector.status()
-            note = "" if state == "ready" else f"\n{LOGIN_HINT}"
-            layout = (
-                f"verified against live pages on {LAYOUT_VERIFIED}"
-                if LAYOUT_VERIFIED
-                else "unverified (not yet checked)"
-            )
-            return f"LinkedIn session: {state}.\nPage layout: {layout}.{note}"
         if command == "/li_messages":
             if rest and not rest.isdecimal():
                 return USAGE[command]

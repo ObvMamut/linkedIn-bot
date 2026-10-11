@@ -19,10 +19,13 @@ class LinkedInConfig(Contract):
     browser_executable: str | None = None
     block_resources: bool = True
     idle_close_seconds: int = Field(default=600, ge=30)
+    # How often a linked public job board is read (pinned firms, `schedule-board`).
     jobs_interval_minutes: int = Field(default=360, ge=1)
+    # How often unread LinkedIn messages are checked for alerts (at least every 30 minutes).
     inbox_interval_minutes: int = Field(default=30, ge=1)
-    requests_interval_minutes: int = Field(default=30, ge=1)
-    posts_interval_minutes: int = Field(default=360, ge=1)
+    # Deprecated and ignored: accepted so older config files still load.
+    requests_interval_minutes: int | None = Field(default=None, ge=1)
+    posts_interval_minutes: int | None = Field(default=None, ge=1)
 
 
 class InferenceConfig(Contract):
@@ -49,6 +52,9 @@ class InferenceConfig(Contract):
         return value.rstrip("/")
 
 
+MIN_BOARD_INTERVAL_MINUTES = 30  # public boards are never read more often than this
+
+
 class Config(Contract):
     schema_version: Literal[1] = 1
     timezone: str = "Europe/Warsaw"
@@ -65,6 +71,10 @@ class Config(Contract):
         except ZoneInfoNotFoundError as exc:
             raise ValueError("unknown timezone") from exc
         return value
+
+    @property
+    def board_interval_seconds(self) -> int:
+        return max(MIN_BOARD_INTERVAL_MINUTES, self.linkedin.jobs_interval_minutes) * 60
 
     @property
     def root(self) -> Path:
